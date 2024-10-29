@@ -26,16 +26,15 @@ if (PICO_SDK_VERSION_STRING VERSION_LESS "1.4.0")
   message(FATAL_ERROR "Raspberry Pi Pico SDK version 1.4.0 (or later) required. Your version is ${PICO_SDK_VERSION_STRING}")
 endif()
 
-project(HandWatch C CXX ASM)
+project(HandWatch C CXX)
 
 set(PICO_CXX_ENABLE_EXCEPTIONS 1)
 
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
 
-SET(FREERTOS_KERNEL_PATH ${CMAKE_CURRENT_SOURCE_DIR}/lib/FreeRTOS-Cpp/FreeRTOS-Kernel)
+SET(FREERTOS_KERNEL_PATH ${CMAKE_CURRENT_SOURCE_DIR}/lib/FreeRTOS-Kernel)
 include(${FREERTOS_KERNEL_PATH}/portable/ThirdParty/GCC/RP2040/FreeRTOS_Kernel_import.cmake)
-
 
 # FILE(GLOB FreeRTOS_src submodules/FreeRTOS-Kernel/*.c)
 
@@ -54,8 +53,8 @@ include(${FREERTOS_KERNEL_PATH}/portable/ThirdParty/GCC/RP2040/FreeRTOS_Kernel_i
 include_directories(
         ./lib/no-OS-FatFS-SD-SPI-RPi-Pico/include
         ./include
-        ./lib/FreeRTOS-Cpp/FreeRTOS-Kernel/include
-        ./lib/FreeRTOS-Cpp/FreeRTOS-Kernel/portable/GCC/ARM_CM0
+        ./lib/FreeRTOS-Kernel/include
+        ./lib/FreeRTOS-Kernel/portable/ThirdParty/GCC/RP2040/include
 )
 file(GLOB SOURCES_C "./source/*.c")
 file(GLOB SOURCES_CXX "./source/*.cpp")
@@ -65,6 +64,7 @@ add_executable(HandWatch
   source/hw_config.cpp
   source/Log.cpp
   source/ButtonInput.cpp
+  lib/FreeRTOS-Kernel/portable/ThirdParty/GCC/RP2040/port.c
 )
 
 add_subdirectory(lib/no-OS-FatFS-SD-SPI-RPi-Pico/FatFs_SPI build)
