@@ -4,14 +4,16 @@
 #define BUTTON_DOWN_PIN 20
 #define BUTTON_ENTER_PIN 19
 #define BUTTON_HOME_PIN 18
+#define BUTTON_MOD_PIN 22
 
 class ButtonInput {
 public:
-    void init();
+    static void init();
 
     // button check
-    bool is_up_pressed();
-    bool is_down_pressed();
-    bool is_enter_pressed();
-    bool is_home_pressed();
+    static bool is_up_pressed();
+    static bool is_down_pressed();
+    static bool is_enter_pressed();
+    static bool is_home_pressed();
+    static bool is_mod_pressed();
 };

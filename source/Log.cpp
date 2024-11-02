@@ -1,22 +1,40 @@
 #include "Log.h"
+#include "LiquidCrystal_I2C.h"
 #include <cstdio>
+#include <ff.h>
+#include <pico/time.h>
 
-void Log::init() {
-    f_mount(&fs, "0:", 1);
-    f_open(&fil, filename, FA_WRITE | FA_CREATE_ALWAYS);
+int Log::init() {
+    printf("Initializing log...\n");
+    auto result = f_open(&fil, filename, FA_WRITE | FA_CREATE_ALWAYS);
+    if (result != FR_OK) {
+        printf("Failed to open %s: %d\n", filename, result);
+        lcd_set_cursor(0, 0);
+        lcd_print("Failed to open file");
+        sleep_ms(1000);
+        printf("Failed to open %s: %d\n", filename, result);
+        return 1;
+    } else {
+        printf("File %s opened successfully.\n", filename);
+        lcd_set_cursor(0, 0);
+        lcd_print("File open successful");
+        sleep_ms(1000);
+    }
     f_close(&fil);
+    printf("Log initialization complete.\n");
+    return 0;
 }
 
 void Log::log(const char* data) {
     f_open(&fil, filename, FA_WRITE | FA_OPEN_APPEND);
     f_printf(&fil, "Trying to log\r\n");
-    f_printf(&fil, "[LOG]: %d\r\n", data);
-    printf("[LOG]: %d\r\n", data);
+    f_printf(&fil, "[LOG]: %s\r\n", data);
+    printf("[LOG]: %s\n", data);
     f_close(&fil);
 }
 
 void Log::quit() {
-    f_unmount("0:");
+    f_close(&fil);
 }
 
     // lcd_set_cursor(0,0);

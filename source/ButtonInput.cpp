@@ -17,6 +17,10 @@ void ButtonInput::init() {
     gpio_init(BUTTON_HOME_PIN);
     gpio_set_dir(BUTTON_HOME_PIN, GPIO_IN);
     gpio_pull_up(BUTTON_HOME_PIN);
+
+    gpio_init(BUTTON_MOD_PIN);
+    gpio_set_dir(BUTTON_MOD_PIN, GPIO_IN);
+    gpio_pull_up(BUTTON_MOD_PIN);
 }
 
 bool ButtonInput::is_up_pressed() {
@@ -30,4 +34,8 @@ bool ButtonInput::is_enter_pressed() {
 }
 bool ButtonInput::is_home_pressed() {
     return !gpio_get(BUTTON_HOME_PIN);
+}
+
+bool ButtonInput::is_mod_pressed() {
+    return !gpio_get(BUTTON_MOD_PIN);
 }

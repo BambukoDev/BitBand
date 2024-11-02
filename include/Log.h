@@ -7,12 +7,11 @@
 
 class Log {
 public:
-    void init();
+    int init();
     void log(const char* data);
     void quit();
 private:
     FRESULT fr;
-	FATFS fs;
 	FIL fil;
     char filename[8] = "log.txt";
 };

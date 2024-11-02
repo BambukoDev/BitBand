@@ -1,3 +1,4 @@
 .idea
 .venv
 build
+include/wifi_data.h
