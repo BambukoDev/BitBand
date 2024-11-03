@@ -37,9 +37,11 @@ const unsigned long I2C_CLOCK = 100000;
 const uint8_t LCD_I2C_ADDRESS = 0x27;
 
 struct process_struct_t {
-    char *backbuffer = NULL;
+    char* backbuffer = NULL;
     datetime_t *curr_time = NULL;
 };
+
+bool SHOULD_CLEAR = false;
 
 int setup() {
 	printf("Setting up Pico modules\r\n");
@@ -91,10 +93,18 @@ void blink_led(void* params) {
 }
 
 void lcd_format_print(char* str, size_t len) {
+	if (SHOULD_CLEAR) {
+        lcd_set_cursor(0, 0);
+        for (int i = 0; i < len; i++) {
+            lcd_print(" ");
+        }
+		SHOULD_CLEAR = false;
+	}
     int curr_line = 0;
+    lcd_set_cursor(0, 0);
     for (int i = 0; i < len; i++) {
-        if (str[i] == '\0') break;
-        if (str[i] == '\n') {
+        if (str[i] == '\0') break; // Terminate at the end of the string OR if the len is reached
+        if (str[i] == '\n') { // Make newline work
             curr_line++;
             lcd_set_cursor(curr_line, 0);
             continue;
@@ -112,13 +122,16 @@ void render(void* params) {
 	char framebuffer[85];
 	char *backbuffer = (char*)params;
 	while(true) {
-		// Copy the backbuffer to framebuffer
+        printf("%s\n", backbuffer);
+        // Copy the backbuffer to framebuffer
 		strncpy(framebuffer, backbuffer, sizeof(char[85]));
 		// Clear the backbuffer
         memset(backbuffer, '\0', sizeof(char[85]));
         // Reset cursor position
         lcd_set_cursor(0, 0);
+		// Print formatted text to lcd
 		lcd_format_print(framebuffer, sizeof(char[85]));
+		// Reset the framebuffer
         memset(framebuffer, '\0', sizeof(char[85]));
 		vTaskDelay(10);
     }
@@ -159,12 +172,14 @@ void process_menus(void* params) {
 			} else {
 				CURRENT_MODE = MODE_TIME;
 			}
-			lcd_clear();
+			// memset(backbuffer, ' ', sizeof(char[85]));
+			SHOULD_CLEAR = true;
+			vTaskDelay(20);
 		}
-		
-		switch (CURRENT_MODE) {
+        memset(backbuffer, '\0', sizeof(char[85]));
+        switch (CURRENT_MODE) {
 			case MODE_TIME: { // Render clock
-                snprintf(backbuffer, 85,
+                snprintf(backbuffer, sizeof(char[85]),
                         "        TIME\n%04d-%02d-%02d %02d:%02d:%02d\n",
                         (int)date->year, (int)date->month, (int)date->day, (int)date->hour, (int)date->min, (int)date->sec);
 				
@@ -229,11 +244,10 @@ void process_menus(void* params) {
 			case (MODE_SELECT): {
 				switch (CURRENT_MENU) {
 					case MENU_NONE: { // Render menu selection
-                        // for (int i = 0; i < MENU_COUNT; i++) {
-						// 	// strcat(backbuffer, menu_stack[i]);
-						// 	// strcat(backbuffer, "\n");
-                        // }
-                        strcpy(backbuffer, "Select a menu");
+                        for (int i = 0; i < MENU_COUNT; i++) {
+							strcat(backbuffer, menu_stack[i]);
+							strcat(backbuffer, "\n");
+                        }
                         break;
 					}
 				}
@@ -241,7 +255,6 @@ void process_menus(void* params) {
 			}
 			break;
 		}
-		printf("%s\n", backbuffer);
 		vTaskDelay(200);
 	}
 }
@@ -285,14 +298,15 @@ int main() {
 	char backbuffer[85] = {'\0'};
 
 	TaskHandle_t render_handle = NULL;
+	TaskHandle_t process_handle = NULL;
 	datetime_t curr_time;
 
 	process_struct_t process_struct;
 	process_struct.backbuffer = backbuffer;
 	process_struct.curr_time = &curr_time;
 
-	xTaskCreate(process_menus, "process", 1024, &process_struct, tskIDLE_PRIORITY, NULL);
-    xTaskCreate(render, "render", 1024, &backbuffer, tskIDLE_PRIORITY, &render_handle);
+	xTaskCreate(process_menus, "process", 1024, &process_struct, tskIDLE_PRIORITY, &process_handle);
+    xTaskCreate(render, "render", 1024, backbuffer, tskIDLE_PRIORITY, &render_handle);
 	xTaskCreate(write_time_to_sd, "write_time_to_sd", 1024, &timekeep, tskIDLE_PRIORITY, NULL);
 	xTaskCreate(tick_time, "tick_time", 1024, &curr_time, tskIDLE_PRIORITY, NULL);
 
