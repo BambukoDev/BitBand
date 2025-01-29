@@ -1,327 +1,257 @@
-// USER INCLUDE
-#include "LiquidCrystal_I2C.h"
-#include "Log.h"
-#include "ButtonInput.h"
-#include "TimeKeep.h"
-
-#include "menus/menu.h"
-
 // SDK INCLUDE
-#include "pico/cyw43_arch.h"
-#include <cstddef>
-#include <cstdio>
-#include <cstring>
+#include <boards/pico_w.h>
 #include <hardware/adc.h>
+#include <hardware/clocks.h>
+#include <hardware/dma.h>
 #include <hardware/gpio.h>
 #include <hardware/i2c.h>
+#include <hardware/irq.h>
+#include <hardware/pwm.h>
+#include <hardware/regs/intctrl.h>
 #include <hardware/rtc.h>
+#include <hardware/sync.h>
 #include <pico/multicore.h>
 #include <pico/stdlib.h>
 #include <pico/time.h>
 #include <pico/types.h>
 #include <pico/util/datetime.h>
 #include <sys/time.h>
-
 #include <sys/types.h>
+
+#include <cmath>
+#include <cstddef>
+#include <cstdio>
+#include <cstring>
+#include <memory>
+#include "mp3dec.h"
+
+extern "C" {
+    #include "ff.h"
+    #include "sd_card.h"
+    #include "music_file.h"
+}
+
+// Wireless stuff
+#include <pico/cyw43_arch.h>
+
+#include "LCD_I2C.hpp"
+#include "DisplayPrint.hpp"
 
 // FreeRTOS
 #include "FreeRTOS.h"
 #include "FreeRTOSConfig.h"
 #include "task.h"
+#include "croutine.h"
 
-#include "wifi_data.h"
+// User includes
+#include "OutputList.hpp"
+#include "LedPulse.hpp"
 
-#define LED_GPIO 27
+#include "soundfile.h"
 
-const unsigned long I2C_CLOCK = 100000;
-const uint8_t LCD_I2C_ADDRESS = 0x27;
+#define CACHE_BUFFER 8000
+unsigned char cache_buffer[CACHE_BUFFER];
+static music_file mf;
 
-struct process_struct_t {
-    char* backbuffer = NULL;
-    datetime_t *curr_time = NULL;
-};
+#define AUDIO_PIN 9
+int wav_position = 0;
 
-bool SHOULD_CLEAR = false;
+void set_rtc_datetime(datetime_t* t = nullptr) {
+    if (t == nullptr) return;
+    rtc_set_datetime(t);
+    sleep_us(128); // wait for the clock to take change (around 3 clock cycles)
+}
 
-int setup() {
-	printf("Setting up Pico modules\r\n");
-	stdio_init_all();
-	rtc_init();
-    ButtonInput::init();
-
-    lcd_init(i2c_default, LCD_I2C_ADDRESS);
-
-	// Initialize ADC
-	// adc_init();
-	// adc_set_temp_sensor_enabled(true);
-
-	if (!sd_init_driver()) {
-		lcd_set_cursor(0,0);
-		lcd_print("SD init failed");
-		sleep_ms(1000);
-		return -2;
-	}
-
-	rtc_init();
-    datetime_t t = {.year = 2024,
-                    .month = 10,
-                    .day = 31,
-                    .dotw = 4,  // 0 is Sunday, so 5 is Friday
-                    .hour = 11,
-                    .min = 00,
-                    .sec = 00};
-	rtc_set_datetime(&t);
-	sleep_us(64);
-    if (!rtc_running()) {
-		lcd_print("RTC not running");
-		sleep_ms(1000);
-	}
-
-	gpio_init(LED_GPIO);
-	gpio_set_dir(LED_GPIO, GPIO_OUT);
-
-	return 0;
+void pwm_interrupt_handler() {
+    // TODO: Figure out why this fixed pause works for 8kHz audio
+    sleep_us(16);
+    if (wav_position < (WAV_DATA_LENGTH<<3) - 1) {
+        pwm_set_gpio_level(AUDIO_PIN, WAV_DATA[wav_position>>3]);
+        wav_position++;
+    } else {
+        wav_position = 0;
+    }
 }
 
 void blink_led(void* params) {
-	while(true) {
-		gpio_put(LED_GPIO, true);
-		vTaskDelay(2000);
-		gpio_put(LED_GPIO, false);
-		vTaskDelay(2000);
-	}
+    uint16_t blink_speed = 10;
+    LedManager led;
+    led.setup_led(&blink_speed);
+    while (true) {
+        // led.blink_led();
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, true);
+        vTaskDelay(500);
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, false);
+        vTaskDelay(500);
+    }
 }
 
-void lcd_format_print(char* str, size_t len) {
-	if (SHOULD_CLEAR) {
-        lcd_set_cursor(0, 0);
-        for (int i = 0; i < len; i++) {
-            lcd_print(" ");
+void log_time(void* params) {
+    while(true) {
+        datetime_t t;
+        if (!rtc_get_datetime(&t)) {
+            printf("%s", "RTC not running!\n");
         }
-		SHOULD_CLEAR = false;
-	}
-    int curr_line = 0;
-    lcd_set_cursor(0, 0);
-    for (int i = 0; i < len; i++) {
-        if (str[i] == '\0') break; // Terminate at the end of the string OR if the len is reached
-        if (str[i] == '\n') { // Make newline work
-            curr_line++;
-            lcd_set_cursor(curr_line, 0);
-            continue;
+        printf("%d/%d/%d %d:%d:%d\n", t.year, t.month, t.day, t.hour, t.min, t.sec);
+        vTaskDelay(1000);
+    }
+}
+
+void test_process(void* params) {
+    // auto lcd = static_cast<LCD_I2C*>(params);
+    while (true) {
+        vCoRoutineSchedule();
+    }
+}
+
+void play_audio(CoRoutineHandle_t xHandle, UBaseType_t uxIndex) {
+    crSTART(xHandle);
+    while (true) {
+        pwm_interrupt_handler();
+    }
+    crEND();
+}
+
+void main_thread(void* params) {
+    LCD_I2C lcd = LCD_I2C(0x27, 20, 4, PICO_DEFAULT_I2C_INSTANCE(), PICO_DEFAULT_I2C_SDA_PIN, PICO_DEFAULT_I2C_SCL_PIN);
+    OutputList olist(&lcd);
+
+    OutputList olist(&lcd);
+
+    lcd.BacklightOn();
+    olist.push("Starting...");
+    olist.render();
+
+    {
+        bool clock_set = set_sys_clock_khz(176000, true);
+        setup_default_uart();
+        if (!clock_set) {
+            olist.push("Overclk failed");
+            olist.render();
+            return -1;
         }
-
-		// Weird magic stuff cuz its C/C++
-        char to_print[2];
-        to_print[0] = str[i];
-        to_print[1] = '\0';
-        lcd_print(to_print);
     }
-}
+    olist.push("Overclk success");
+    olist.render();
 
-void render(void* params) {
-	char framebuffer[85];
-	char *backbuffer = (char*)params;
-	while(true) {
-        printf("%s\n", backbuffer);
-        // Copy the backbuffer to framebuffer
-		strncpy(framebuffer, backbuffer, sizeof(char[85]));
-		// Clear the backbuffer
-        memset(backbuffer, '\0', sizeof(char[85]));
-        // Reset cursor position
-        lcd_set_cursor(0, 0);
-		// Print formatted text to lcd
-		lcd_format_print(framebuffer, sizeof(char[85]));
-		// Reset the framebuffer
-        memset(framebuffer, '\0', sizeof(char[85]));
-		vTaskDelay(10);
+    printf("%s", "Setting up Pico modules\n");
+    stdio_init_all();
+
+    rtc_init();
+    datetime_t t = {
+        .year = 2025, .month = 1, .day = 8, .hour = 16, .min = 00, .sec = 00};
+    set_rtc_datetime(&t);
+    if (!rtc_running()) {
+        olist.push("RTC failed");
+        olist.render();
+        sleep_ms(1000);
     }
-}
+    olist.push("RTC success");
+    olist.render();
 
-void process_menus(void* params) {
-	enum CURRENT_MODE {
-		MODE_TIME,
-		MODE_SELECT
-	} CURRENT_MODE;
-	CURRENT_MODE = MODE_TIME;
-	enum CURRENT_MENU {
-		MENU_NONE,
-		MENU_WIFI_CONNECT,
-		MENU_SETTINGS,
-		MENU_CREDITS
-	} CURRENT_MENU;
-	const uint8_t MENU_COUNT = 4;
+    adc_init();
+    adc_set_temp_sensor_enabled(true);
+    cyw43_arch_init();
+    gpio_init(CYW43_WL_GPIO_LED_PIN);
 
-	uint8_t current_menu = 0;
-	char menu_stack[MENU_COUNT][21]; // extra space for \0 character
-    strcpy(menu_stack[0], "Connect to WIFI");
-    strcpy(menu_stack[1], "Settings");
-	strcpy(menu_stack[2], "Credits");
-    strcpy(menu_stack[3], "Sleep");
-
-	process_struct_t *process_struct = (process_struct_t*)params;
-    char *backbuffer = process_struct->backbuffer;
-	datetime_t *date = process_struct->curr_time;
-    // print if rtc is running
-	uint8_t date_field = 0; // 0: year, 1: month, 2: day, 3: hour, 4: min, 5: sec
-	while(true) {
-		char TimeString[85];
-		if (ButtonInput::is_mod_pressed()) { // Simple switch between modes
-            printf("Mode switched\n");
-            if (CURRENT_MODE == MODE_TIME) {
-				CURRENT_MODE = MODE_SELECT;
-			} else {
-				CURRENT_MODE = MODE_TIME;
-			}
-			// memset(backbuffer, ' ', sizeof(char[85]));
-			SHOULD_CLEAR = true;
-			vTaskDelay(20);
-		}
-        memset(backbuffer, '\0', sizeof(char[85]));
-        switch (CURRENT_MODE) {
-			case MODE_TIME: { // Render clock
-                snprintf(backbuffer, sizeof(char[85]),
-                        "        TIME\n%04d-%02d-%02d %02d:%02d:%02d\n",
-                        (int)date->year, (int)date->month, (int)date->day, (int)date->hour, (int)date->min, (int)date->sec);
-				
-				// Change time depending on the current field selected
-				if (ButtonInput::is_down_pressed()) {
-					date_field = (date_field + 1) % 6;
-				}
-				if (ButtonInput::is_up_pressed()) {
-					date_field = (date_field - 1 + 6) % 6;
-				}
-				if (ButtonInput::is_home_pressed()) {
-					switch (date_field) {
-						case 0: // change year
-                            date->year++;
-                            break;
-						case 1: // change month
-                            date->month = (date->month % 12) + 1;
-                            break;
-						case 2: // change day
-							date->day = (date->day % 28) + 1; // Only valid for non-leap years
-							break;
-						case 3: // change hour
-                            date->hour = (date->hour + 1) % 24;
-                            break;
-						case 4: // change min
-                            date->min = (date->min + 1) % 60;
-                            break;
-						case 5: // change sec
-                            date->sec = 0;
-                            break;
-					}
-				}
-				if (ButtonInput::is_enter_pressed()) {
-					switch (date_field) {
-						case 0: // change year
-							date->year--;
-							break;
-						case 1: // change month
-                            date->month = (date->month - 1 + 12) % 12;
-                            break;
-						case 2: // change day
-							date->day = (date->day - 1 + 28) % 28; // Only valid for non-leap years
-							break;
-						case 3: // change hour
-                            date->hour = (date->hour - 1 + 24) % 24;
-                            break;
-						case 4: // change min
-                            date->min = (date->min - 1 + 60) % 60;
-                            break;
-						case 5: // change sec
-                            date->sec = 0;
-                            break;
-					}
-				}
-				snprintf(backbuffer + 33, 31, "%c    %c  %c  %c  %c  %c\n", (date_field == 0) ? '^' : ' ', (date_field == 1) ? '^' : ' ', (date_field == 2) ? '^' : ' ', (date_field == 3) ? '^' : ' ', (date_field == 4) ? '^' : ' ', (date_field == 5) ? '^' : ' ');
-				rtc_set_datetime(date);
-				sleep_us(64);
-                // printf("[TIME]: %04d-%02d-%02d %02d:%02d:%02d\n", t.year,
-                // t.month, t.day, t.hour, t.min, t.sec);
-				break;
-            }
-			case (MODE_SELECT): {
-				switch (CURRENT_MENU) {
-					case MENU_NONE: { // Render menu selection
-                        for (int i = 0; i < MENU_COUNT; i++) {
-							strcat(backbuffer, menu_stack[i]);
-							strcat(backbuffer, "\n");
-                        }
-                        break;
-					}
-				}
-				break;
-			}
-			break;
-		}
-		vTaskDelay(200);
-	}
-}
-
-void write_time_to_sd(void *params) {
-	auto *timekeep = (TimeKeep*)params;
-	while (true) {
-        timekeep->write_current_time();
-		vTaskDelay(1000);
+    if (!sd_init_driver()) {
+        olist.push("SD failed");
+        olist.render();
+        sleep_ms(1000);
+        return -2;
     }
-}
+    olist.push("SD success");
+    olist.render();
 
-void tick_time(void* params) {
-	datetime_t *date = (datetime_t*)params;
-	while(true) {
-		rtc_get_datetime(date);
-		sleep_us(64);
-		vTaskDelay(1000);
-	}
+    // TODO: Implement a scrolling list for loading text for submodules
+
+    FATFS filesystem;
+    FRESULT fr;
+    fr = f_mount(&filesystem, "0:", 1);
+    if (fr != FR_OK) {
+        lcd.SetCursor(1, 0);
+        lcd.PrintString("SD mount failed");
+        sleep_ms(1000);
+        return -3;
+    }
+
+    gpio_set_function(AUDIO_PIN, GPIO_FUNC_PWM);
+
+    uint audio_pin_slice = pwm_gpio_to_slice_num(AUDIO_PIN);
+
+    // pwm_clear_irq(audio_pin_slice);
+    // pwm_set_irq_enabled(audio_pin_slice, true);
+
+    // irq_set_exclusive_handler(PWM_IRQ_WRAP, pwm_interrupt_handler);
+    // irq_set_enabled(PWM_IRQ_WRAP, true);
+
+    pwm_config pwm_config = pwm_get_default_config();
+
+    /* Base clock 176,000,000 Hz divide by wrap 250 then the clock divider
+     * further divides to set the interrupt rate.
+     *
+     * 11 KHz is fine for speech. Phone lines generally sample at 8 KHz
+     *
+     *
+     * So clkdiv should be as follows for given sample rate
+     *  8.0f for 11 KHz
+     *  4.0f for 22 KHz
+     *  2.0f for 44 KHz etc
+     */
+    // pwm_config_set_clkdiv(&pwm_config, 20.0f);
+    // pwm_config_set_wrap(&pwm_config, 250);
+    pwm_init(audio_pin_slice, &pwm_config, false);
+    pwm_set_enabled(audio_pin_slice, true);
+
+    pwm_set_gpio_level(AUDIO_PIN, 0);
+
+    olist.push("No errors reported");
+    olist.render();
+    // lcd.SetCursor(1, 0);
+    printf("%s", "No errors reported");
+    // timed_print(&lcd, "No errors reported", 18, 50);
+
+    sleep_ms(2000);
+    lcd.Clear();
+    lcd.Home();
+    timed_print(&lcd, "Test string!", 12, 50);
 }
 
 int main() {
-	printf("STARTING PICO");
-	setup();
+    constexpr auto I2C = PICO_DEFAULT_I2C_INSTANCE();
+    constexpr auto SDA = PICO_DEFAULT_I2C_SDA_PIN;
+    constexpr auto SCL = PICO_DEFAULT_I2C_SCL_PIN;
+    constexpr auto I2C_ADDRESS = 0x27;
+    constexpr auto LCD_COLUMNS = 20;
+    constexpr auto LCD_ROWS = 4;
 
-	FATFS filesystem;
-	f_mount(&filesystem, "0:", 1);
+    LCD_I2C lcd = LCD_I2C(I2C_ADDRESS, LCD_COLUMNS, LCD_ROWS, I2C, SDA, SCL);
 
-	Log log;
-	log.init();
-	log.log("# Raspberry PI Pico W : BukoPI Version 0.1");
-	log.log("# This is a logfile of the last run of the device");
+    
 
-	TimeKeep timekeep;
-	timekeep.load_current_time();
+    TaskHandle_t blink_handle = nullptr;
 
-	lcd_clear();
-	lcd_set_cursor(0,0);
+    // MP3InitDecoder();
+    // if (!musicFileCreate(&mf, "example.mp3", cache_buffer, CACHE_BUFFER)) {
+    //     lcd.SetCursor(2, 0);
+    //     lcd.PrintString("Cannot open music!");
+    // }
 
-	// Setup rendering values
-	char backbuffer[85] = {'\0'};
+    // bool playing = true;
+    // while (playing) {
+    //     MP3FrameInfo frame_info;
+    //     unsigned char buf[1024];
+    //     MP3GetNextFrameInfo(mf.hMP3Decoder, &frame_info, buf);
+        
+    // }
 
-	TaskHandle_t render_handle = NULL;
-	TaskHandle_t process_handle = NULL;
-	datetime_t curr_time;
+    // pwm_set_enabled(AUDIO_PIN, true);
 
-	process_struct_t process_struct;
-	process_struct.backbuffer = backbuffer;
-	process_struct.curr_time = &curr_time;
-
-	xTaskCreate(process_menus, "process", 1024, &process_struct, tskIDLE_PRIORITY, &process_handle);
-    xTaskCreate(render, "render", 1024, backbuffer, tskIDLE_PRIORITY, &render_handle);
-	xTaskCreate(write_time_to_sd, "write_time_to_sd", 1024, &timekeep, tskIDLE_PRIORITY, NULL);
-	xTaskCreate(tick_time, "tick_time", 1024, &curr_time, tskIDLE_PRIORITY, NULL);
+    xTaskCreate(blink_led, "blink", 1024, nullptr, tskIDLE_PRIORITY, &blink_handle);
+    xTaskCreate(log_time, "log_time", 1024, nullptr, tskIDLE_PRIORITY, nullptr);
+    xTaskCreate(test_process, "test_process", 1024, &lcd, tskIDLE_PRIORITY, nullptr);
+    xCoRoutineCreate(play_audio, 0, 0);
 
     vTaskStartScheduler();
-
-	// should never get here
-
-	log.log("Quitting...");
-	lcd_clear();
-	lcd_set_cursor(0,0);
-	lcd_print("quit start");
-
-	log.quit();
-
-	lcd_set_cursor(1,0);
-	lcd_print("quit end");
     return 0;
 }
