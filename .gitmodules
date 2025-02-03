@@ -7,3 +7,6 @@
 [submodule "lib/json-maker"]
 	path = lib/json-maker
 	url = https://github.com/rafagafe/json-maker
+[submodule "lib/libwave"]
+	path = lib/libwave
+	url = https://github.com/brglng/libwave

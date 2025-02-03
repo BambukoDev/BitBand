@@ -45,6 +45,7 @@ pico_sdk_init()
 include_directories(
         lib/no-OS-FatFS-SD-SPI-RPi-Pico/include
         include
+        lib/
         lib/FreeRTOS-Kernel/include
         lib/FreeRTOS-Kernel/portable/ThirdParty/GCC/RP2040/include
         lib/tiny-json/
@@ -56,6 +57,7 @@ include_directories(
         lib/Pico-libs/Button/
         lib/Pico-libs/PWM DMA Audio
         lib/Pico-libs/Keypad Matrix
+        lib/libwave/
 )
 
 file(GLOB SOURCES_C "./source/*.c")
@@ -77,6 +79,8 @@ add_subdirectory(lib/no-OS-FatFS-SD-SPI-RPi-Pico/FatFs_SPI build)
 add_subdirectory(lib/json-maker/src)
 
 add_subdirectory(lib/picomp3lib/src)
+
+add_subdirectory(lib/libwave/)
 
 add_subdirectory("lib/Pico-libs/Battery Check")
 add_subdirectory("lib/Pico-libs/Button/")
@@ -112,6 +116,7 @@ target_link_libraries(HandWatch
         FatFs_SPI
         picomp3lib
         FreeRTOS-Kernel-Heap4
+        wave
 )
 
 pico_add_extra_outputs(HandWatch)

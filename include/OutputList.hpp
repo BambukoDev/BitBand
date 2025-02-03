@@ -22,6 +22,7 @@ public:
             lines[1] = lines[2];
             lines[2] = lines[3];
             lines[3] = data;
+            lcd->Clear();
         }
     }
 
@@ -41,6 +42,7 @@ public:
                 lcd->PrintString(lines[i]);
             } else { // print last line slowed
                 timed_print(lcd, lines[i], strlen(lines[i]), 50);
+                // lcd->PrintString(lines[i]);
             }
         }
 
