@@ -58,6 +58,7 @@ include_directories(
         lib/Pico-libs/PWM DMA Audio
         lib/Pico-libs/Keypad Matrix
         lib/libwave/
+        lib/pico-ds1302/
 )
 
 file(GLOB SOURCES_C "./source/*.c")
@@ -72,6 +73,7 @@ add_executable(HandWatch
   lib/tiny-json/tiny-json.c
   lib/picomp3lib/interface/music_file.c
   lib/Pico-I2C-LCD/LCD_I2C.cpp
+  lib/pico-ds1302/ds1302.c
 )
 
 add_subdirectory(lib/no-OS-FatFS-SD-SPI-RPi-Pico/FatFs_SPI build)

@@ -35,6 +35,8 @@ extern "C" {
 
     #define DR_WAV_IMPLEMENTATION
     #include "dr_wav.h"
+
+    // #include "ds1302.h"
 }
 
 // Wireless stuff
@@ -72,21 +74,25 @@ LCD_I2C lcd = LCD_I2C(I2C_ADDRESS, LCD_COLUMNS, LCD_ROWS, I2C, SDA, SCL);
 
 #define BTN_UP 21
 #define BTN_DOWN 20
-#define BTN_LEFT 19
+#define BTN_HOME 19
 #define BTN_SELECT 18
 #define BTN_MODE 22
 
 // #include "soundfile.h"
 
+#define MAX_FILE_COUNT 100
 FATFS fs;
 bool playing = false;
 bool paused = false;
-char files[10][32];
+char files[MAX_FILE_COUNT][32];
 int file_count = 0;
 int selected_file = 0;
 
 #define BRIGHTNESS_PIN 6
 #define AUDIO_PIN 9
+
+Menu mainmenu;
+Menu musicmenu;
 
 void set_rtc_datetime(datetime_t* t = nullptr) {
     if (t == nullptr) return;
@@ -100,6 +106,13 @@ void check_core(const char* name) {
     } else {
         printf("%s: %s\n", name, "Running on core 0");
     }
+}
+
+void launch_execute_task(void* params) {
+    check_core("launch");
+    if (Menu::get_current()) Menu::get_current()->execute_current();
+    printf("%s\n", "launch executed successfully");
+    vTaskDelete(NULL);
 }
 
 void render(void* params) {
@@ -116,7 +129,7 @@ void render(void* params) {
 
 void blink_led(void* params) {
     LedManager led;
-    uint16_t speed = 10;
+    uint16_t speed = 100;
     led.setup_led(&speed);
     while (true) {
         led.blink_led();
@@ -143,7 +156,7 @@ void scan_files() {
     FILINFO fno;
     file_count = 0;
     if (f_opendir(&dir, "music") == FR_OK) { // Open "music" folder
-        while (f_readdir(&dir, &fno) == FR_OK && fno.fname[0] && file_count < 10) {
+        while (f_readdir(&dir, &fno) == FR_OK && fno.fname[0] && file_count < MAX_FILE_COUNT) {
             if (!(fno.fattrib & AM_DIR) && strstr(fno.fname, ".wav")) {
                 snprintf(files[file_count], sizeof(files[file_count]), "%s", fno.fname);
                 file_count++;
@@ -170,30 +183,27 @@ drwav_bool32 wav_seek_callback(void* pUserData, int offset, drwav_seek_origin or
 }
 
 void play_wav_task(void *pvParameters) {
+    if (playing) vTaskDelete(NULL);
     check_core("music");
 
-    if (playing) vTaskDelete(NULL); // Prevent multiple instances of the task
+    char filename[40] = "music/";
+    strncat(filename, (char*)pvParameters, sizeof(filename) - 7);
 
-    std::string filename = "music/" + std::string((char*)pvParameters);
     FIL file;
-    if (f_open(&file, filename.c_str(), FA_READ) == FR_OK) {
+    if (f_open(&file, filename, FA_READ) == FR_OK) {
         drwav wav;
         if (drwav_init(&wav, wav_read_callback, wav_seek_callback, &file, NULL)) {
             playing = true;
             int16_t sampleBuffer[2];
             uint16_t outputSample;
-            uint32_t elapsed_frames = 0;
-            uint32_t last_update_time = 0;
+            uint32_t elapsed_frames = 0, last_update_time = 0;
             lcd.Clear();
 
-            // Preallocated buffers to avoid string operations
-            char bar[22] = "[                  ]";
+            char bar[22] = "[                   ]";
             char time_display[16];
 
             while (playing && drwav_read_pcm_frames(&wav, 1, sampleBuffer) > 0) {
-                while (paused) {
-                    vTaskDelay(10);
-                }
+                while (paused) vTaskDelay(10);
 
                 if (wav.channels == 2) {
                     outputSample = ((int16_t)sampleBuffer[0] + (int16_t)sampleBuffer[1]) / 2;
@@ -202,31 +212,26 @@ void play_wav_task(void *pvParameters) {
                 }
                 uint8_t pwmValue = (outputSample >> 8) + 128;
                 pwm_set_gpio_level(AUDIO_PIN, pwmValue);
-                busy_wait_us(1000000 / wav.sampleRate);
+                busy_wait_us(880000 / wav.sampleRate);
                 elapsed_frames++;
 
-                // Update the display only if at least 1 second has passed
                 uint32_t elapsed_seconds = elapsed_frames / wav.sampleRate;
                 if (elapsed_seconds != last_update_time) {
                     last_update_time = elapsed_seconds;
 
-                    // Progress bar calculation using integer math
                     int progress = (elapsed_frames * 20) / wav.totalPCMFrameCount;
-                    for (int i = 1; i <= 20; i++) {
-                        bar[i] = (i <= progress) ? '=' : ' ';
-                    }
+                    memset(bar + 1, '=', progress);
+                    memset(bar + 1 + progress, ' ', 20 - progress);
 
-                    // Time formatting using integer math
-                    uint32_t elapsed_min = elapsed_seconds / 60;
-                    uint32_t elapsed_sec = elapsed_seconds % 60;
+                    uint32_t elapsed_min = elapsed_seconds / 60, elapsed_sec = elapsed_seconds % 60;
                     uint32_t total_min = (wav.totalPCMFrameCount / wav.sampleRate) / 60;
                     uint32_t total_sec = (wav.totalPCMFrameCount / wav.sampleRate) % 60;
                     snprintf(time_display, sizeof(time_display), "%02u:%02u / %02u:%02u", elapsed_min, elapsed_sec, total_min, total_sec);
 
-                    // Update the display
                     render_set_row(0, bar);
                     render_set_row(1, time_display);
                     render_set_row(2, playing ? "Playing" : "Paused");
+                    render_set_row(3, (char*)pvParameters);
                 }
             }
             drwav_uninit(&wav);
@@ -234,9 +239,13 @@ void play_wav_task(void *pvParameters) {
         f_close(&file);
     }
     playing = false;
+    musicmenu.set_as_current();
     vTaskDelete(NULL);
 }
 
+void logic_task() {
+    check_core("logic");
+}
 
 void lcd_update() {
     lcd.PrintString("Select track:");
@@ -247,55 +256,52 @@ void lcd_update() {
     }
 }
 
+void gpio_callback(uint gpio, uint32_t events) {
+    if (gpio == BTN_UP) Menu::get_current()->move_selection(-1);
+    else if (gpio == BTN_DOWN) Menu::get_current()->move_selection(1);
+    else if (gpio == BTN_HOME) {
+        playing = false;
+        mainmenu.set_as_current();
+    }
+    else if (gpio == BTN_MODE) paused = !paused;
+    else if (gpio == BTN_SELECT) {
+        //slide_clear_animation(&lcd);
+        TaskHandle_t xHandle;
+        xTaskCreate(launch_execute_task, "launch", 1024, NULL, tskIDLE_PRIORITY, &xHandle);
+        vTaskCoreAffinitySet(xHandle, CORE_AFFINITY_0);
+        printf("%s\n", "Launched task!");
+    }
+    printf("%s\n", "Button callback");
+}
+
 void button_task(void *pvParameters) {
     check_core("button");
 
     gpio_init(BTN_UP);
     gpio_init(BTN_DOWN);
+    gpio_init(BTN_HOME);
     gpio_init(BTN_SELECT);
     gpio_init(BTN_MODE);
-    
 
     gpio_set_dir(BTN_UP, GPIO_IN);
     gpio_set_dir(BTN_DOWN, GPIO_IN);
+    gpio_set_dir(BTN_HOME, GPIO_IN);
     gpio_set_dir(BTN_SELECT, GPIO_IN);
     gpio_set_dir(BTN_MODE, GPIO_IN);
 
     gpio_pull_up(BTN_UP);
     gpio_pull_up(BTN_DOWN);
+    gpio_pull_up(BTN_HOME);
     gpio_pull_up(BTN_SELECT);
     gpio_pull_up(BTN_MODE);
 
-    while (true) {
-        if (!gpio_get(BTN_UP)) {
-            if (Menu::get_current()) Menu::get_current()->move_selection(-1);
-            // selected_file = (selected_file - 1 + file_count) % file_count;
-            // lcd_update();
-            vTaskDelay(pdMS_TO_TICKS(200));
-        }
-        if (!gpio_get(BTN_DOWN)) {
-            if (Menu::get_current()) Menu::get_current()->move_selection(1);
-            // selected_file = (selected_file + 1) % file_count;
-            // lcd_update();
-            vTaskDelay(pdMS_TO_TICKS(200));
-        }
-        if (!gpio_get(BTN_MODE)) {
-            paused = !paused;
-            // mainmenu.set_as_current();
-            // TaskHandle_t xHandle;
-            // xTaskCreate(play_wav_task, "PlayWav", 4096, (void *)files[selected_file], 2, &xHandle);
-            // vTaskCoreAffinitySet(xHandle, CORE_AFFINITY_1);
-            // render_clear_buffer();
-            // vTaskDelay(pdMS_TO_TICKS(200));
-        }
-        if (!gpio_get(BTN_SELECT)) {
-            slide_clear_animation(&lcd);
-            if (Menu::get_current()) Menu::get_current()->execute_current();
-            
-            vTaskDelay(pdMS_TO_TICKS(200));
-        }
-        vTaskDelay(pdMS_TO_TICKS(100));
-    }
+    gpio_set_irq_enabled_with_callback(BTN_UP, GPIO_IRQ_EDGE_FALL, true, &gpio_callback);
+    gpio_set_irq_enabled(BTN_DOWN, GPIO_IRQ_EDGE_FALL, true);
+    gpio_set_irq_enabled(BTN_HOME, GPIO_IRQ_EDGE_FALL, true);
+    gpio_set_irq_enabled(BTN_SELECT, GPIO_IRQ_EDGE_FALL, true);
+    gpio_set_irq_enabled(BTN_MODE, GPIO_IRQ_EDGE_FALL, true);
+
+    while (true) vTaskDelay(pdMS_TO_TICKS(500));
 }
 
 int main() {
@@ -336,7 +342,7 @@ int main() {
     printf("%s", "Setting up Pico modules\n");
 
     rtc_init();
-    datetime_t t = { .year = 2025, .month = 1, .day = 8, .hour = 16, .min = 00, .sec = 00};
+    datetime_t t = { .year = 2025, .month = 2, .day = 5, .hour = 12, .min = 00, .sec = 00};
     set_rtc_datetime(&t);
     if (!rtc_running()) {
         olist.push("RTC failed");
@@ -399,26 +405,40 @@ int main() {
 
     pwm_set_gpio_level(AUDIO_PIN, 0);
 
+    scan_files();
+
     printf("%s", "No errors reported\n");
     olist.push("No errors reported");
     olist.render();
 
     // FIXME: Temp code
-    Menu mainmenu;
-    mainmenu.add_option("Test", []() { printf("%s\n", "Test"); });
-    mainmenu.add_option("Testus", []() { printf("%s\n", "Testus"); });
-    mainmenu.add_option("Testus1", []() { printf("%s\n", "Testus1"); });
-    mainmenu.add_option("Testus2", []() { printf("%s\n", "Testus2"); });
-    mainmenu.add_option("Testus3", []() { printf("%s\n", "Testus3"); });
-    mainmenu.add_option("Testus4", []() {
-        printf("%s\n", "Testus4");
-        TaskHandle_t xHandle;
-        xTaskCreate(play_wav_task, "PlayWav", 4096, (void*)files[selected_file], 2, &xHandle);
-        vTaskCoreAffinitySet(xHandle, CORE_AFFINITY_1);
-        Menu::remove_current();
-        render_clear_buffer();
-    });
+
+    int i = 1234;
+    mainmenu.add_option("Test", [](void* p) { printf("%s\n", "Test"); }, &i);
+    mainmenu.add_option("Testus", [](void* p) { printf("%s\n", "Testus"); }, nullptr);
+    mainmenu.add_option("Testus1", [](void* p) { printf("%s\n", "Testus1"); }, nullptr);
+    mainmenu.add_option("Testus2", [](void* p) { printf("%s\n", "Testus2"); }, nullptr);
+    mainmenu.add_option("Testus3", [](void* p) { printf("%s\n", "Testus3"); }, nullptr);
+    mainmenu.add_option("Music", [](void* p) {
+        printf("%s\n", "Pressed music");
+        musicmenu.set_as_current();
+        printf("%s\n", "Set music menu as current");
+    }, nullptr);
     mainmenu.set_as_current();
+
+    printf("%s: %i\n", "File count", file_count);
+    for (int i = 0; i < file_count; i++) {
+        printf("%s %s\n", "Adding menu", files[i]);
+        musicmenu.add_option(files[i], [](void* p) {
+            int f = *(int*)p;
+            printf("%s: %i\n", "Playing music track", f);
+            TaskHandle_t xHandle;
+            xTaskCreate(play_wav_task, "PlayWav", 4096, (void*)files[2], 2, &xHandle);
+            vTaskCoreAffinitySet(xHandle, CORE_AFFINITY_1);
+            Menu::remove_current();
+            render_clear_buffer();
+        }, (void*)&i);
+    }
 
     // sleep_ms(2000);
     lcd.Clear();
@@ -426,22 +446,21 @@ int main() {
     timed_print(&lcd, "Test string!", 12, 50);
 
     TaskHandle_t xHandle;
-    scan_files();
 
     // xTaskCreate(main_thread, "main", 1024, &lcd, tskIDLE_PRIORITY + 4UL, nullptr);
-    xTaskCreate(blink_led, "blink", 1024, NULL, tskIDLE_PRIORITY, &xHandle);
+    xTaskCreate(blink_led, "blink", 128, NULL, tskIDLE_PRIORITY, &xHandle);
     vTaskCoreAffinitySet(xHandle, CORE_AFFINITY_0);
 
-    xTaskCreate(log_time, "log_time", 1024, NULL, tskIDLE_PRIORITY, &xHandle);
+    xTaskCreate(log_time, "log_time", 256, NULL, tskIDLE_PRIORITY, &xHandle);
     vTaskCoreAffinitySet(xHandle, CORE_AFFINITY_0);
 
-    xTaskCreate(button_task, "button_input", 1024, NULL, tskIDLE_PRIORITY, &xHandle);
+    xTaskCreate(button_task, "button_input", 256, NULL, tskIDLE_PRIORITY, &xHandle);
     vTaskCoreAffinitySet(xHandle, CORE_AFFINITY_0);
 
     xTaskCreate(render, "render", 1024, nullptr, tskIDLE_PRIORITY, &xHandle);
     vTaskCoreAffinitySet(xHandle, CORE_AFFINITY_0);
 
-    printf("%s", "All tasks set up successfully");
+    printf("%s\n", "All tasks set up successfully");
 
     vTaskStartScheduler();
     return 0;

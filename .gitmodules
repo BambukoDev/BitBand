@@ -10,3 +10,6 @@
 [submodule "lib/libwave"]
 	path = lib/libwave
 	url = https://github.com/brglng/libwave
+[submodule "lib/pico-ds1302"]
+	path = lib/pico-ds1302
+	url = https://github.com/kenwebb/pico-ds1302

@@ -9,8 +9,6 @@
 #include <map>
 #include <vector>
 
-typedef void (*menu_callback_t)();
-
 class Menu {
 public:
     // TODO: Make it work for less than 4 options
@@ -34,8 +32,14 @@ public:
 
     void execute_current() {
         auto iter = options.begin();
+        printf("%s: %lu\n", "Options size", options.size());
+        printf("%s: %i\n", "Executing option", current_index + current_inside_view);
         std::advance(iter, current_index + current_inside_view);
-        iter->second();
+        printf("%s: %s\n", "Executing option", iter->first.c_str());
+        int f = *(int*)iter->second.second;
+        printf("%s: %i\n", "Param to function: ", f);
+        iter->second.first(iter->second.second);
+        printf("%s: %i\n", "Executed option", current_index + current_inside_view);
     }
 
     // TODO: Make it work for scroll wheel
@@ -85,17 +89,25 @@ public:
         Menu::current_menu = nullptr;
     }
 
-    void add_option(std::string name, menu_callback_t callback) {
-        options[name] = callback;
+    void add_option(std::string name, std::function<void(void*)> callback, void* params) {
+        // /options[name] = callback;
+        // options.emplace(std::pair(std::string(name), callback));
+        options.push_back(std::pair(std::string(name), std::pair(callback, params)));
     }
 
     void remove_option(std::string name) {
-        options.erase(name);
+        for (int i = 0; i < options.size(); i++) {
+            if (options[i].first == name) {
+                options.erase(options.begin() + i);
+                break;
+            }
+        }
     }
     
 private:
     static Menu *current_menu;
-    std::map<std::string, menu_callback_t> options;
+    // std::map<std::string, std::function<void()>> options;
+    std::vector<std::pair<std::string, std::pair<std::function<void(void*)>, void*>>> options;
 
     // Control the rendering
     int current_index = 0;
