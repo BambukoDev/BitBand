@@ -26,7 +26,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
-#include <memory>
+#include <vector>
 
 extern "C" {
     #include "ff.h"
@@ -84,7 +84,7 @@ LCD_I2C lcd = LCD_I2C(I2C_ADDRESS, LCD_COLUMNS, LCD_ROWS, I2C, SDA, SCL);
 #define ROTARY_B_PIN 16  // Pin connected to the B signal of the rotary encoder
 
 volatile uint32_t last_interrupt_time = 0;  // Debounce timing
-const uint32_t debounce_delay = 400;          // Adjust this delay (milliseconds)
+const uint32_t debounce_delay = 300;          // Adjust this delay (milliseconds)
 
 // #include "soundfile.h"
 
@@ -107,10 +107,9 @@ CURRENT_MODE_T CURRENT_MODE = MODE_TIME;
 Menu mainmenu;
 Menu musicmenu;
 Menu settingsmenu;
+Menu alarmmenu;
 
-uint8_t alarm_hour = 15;
-uint8_t alarm_minute = 50;
-uint8_t alarm_second = 0;
+std::vector<TaskHandle_t> alarm_handles;
 
 void set_local_datetime(datetime_t* t = nullptr) {
     if (t == nullptr) return;
@@ -243,73 +242,6 @@ void log_accel(void* params) {
     }
 }
 
-void repl_task(void* pvParameters) {
-    char input_buffer[64];
-    int index = 0;
-
-    while (true) {
-        // Wait for USB serial connection
-        while (!tud_cdc_connected()) {
-            vTaskDelay(pdMS_TO_TICKS(100));
-        }
-
-        tud_cdc_write_str("\n> ");  // Print prompt
-        tud_cdc_write_flush();
-
-        // Read input
-        while (true) {
-            if (tud_cdc_available()) {
-                char c = tud_cdc_read_char();
-                if (c == '\r' || c == '\n') {  // Enter key pressed
-                    input_buffer[index] = '\0';
-                    tud_cdc_write_str("\n");
-                    tud_cdc_write_flush();
-                    break;
-                } else if (index < (sizeof(input_buffer) - 1)) {
-                    input_buffer[index++] = c;
-                    tud_cdc_write_char(c);  // Echo back
-                    tud_cdc_write_flush();
-                }
-            }
-            vTaskDelay(pdMS_TO_TICKS(10));  // Reduce CPU usage
-        }
-
-        // Parse command
-        if (strncmp(input_buffer, "set_time", 8) == 0) {
-            tud_cdc_write_str("Setting time...\n");
-            // Example: set_time 2025/02/08 14:30:00
-            int year, month, day, hour, minute, second;
-            char date_str[11], time_str[8];
-            int n =sscanf(input_buffer + 9, "%10s %7s", date_str, time_str);
-
-            if (n == 2) {
-                // Parse date: yyyy/mm/dd
-                if (sscanf(date_str, "%d/%d/%d", &year, &month, &day) == 3 &&
-                    sscanf(time_str, "%d:%d:%d", &hour, &minute, &second) == 3) {
-                    // Set time on DS1302
-                    tud_cdc_write_str("Setting time...\n");
-                    set_datetime(year - 2000, month, day, hour, minute, second);
-                    tud_cdc_write_str("Time set!\n");
-                    tud_cdc_write_str("Current time: ");
-                    tud_cdc_write_str(get_time_string().c_str());
-                    tud_cdc_write_char('\n');
-                } else {
-                    tud_cdc_write_str("Invalid date or time format. Use yyyy/mm/dd hh:mm:ss.\n");
-                }
-            } else {
-                tud_cdc_write_str("Invalid command format. Use: set_time yyyy/mm/dd hh:mm:ss\n");
-            }
-        } else if (strcmp(input_buffer, "get_time") == 0) {
-            tud_cdc_write_str("Fetching time...\n");
-            tud_cdc_write_str(get_time_string().c_str());
-            tud_cdc_write_char('\n');
-        } else {
-            tud_cdc_write_str("Unknown command\n");
-        }
-        tud_cdc_write_flush();
-        index = 0;  // Reset input
-    }
-}
 
 void log_time(void* params) {
     DateTime now;
@@ -429,19 +361,31 @@ void play_wav_task(void *pvParameters) {
 }
 
 void alarm_task(void *params) {
+    DateTime *alarm = (DateTime*)params;
+    if (alarm == nullptr) {
+        printf("%s\n", "Alarm task failed");
+        vTaskDelete(NULL);
+    }
     DateTime now;
     ds1302getDateTime(&now);
-    while (now.hour != alarm_hour && now.minute != alarm_minute && now.second != alarm_second) {
-        vTaskDelay(5000);
+    printf("%s: %02u:%02u:%02u", "Alarm set on", alarm->hour, alarm->minute, alarm->second);
+    // TODO: Figure out how to make an alarm
+    while (true) {
+        if (now.hour == alarm->hour && now.minute == alarm->minute && now.second == alarm->second) {
+            break;
+        }
         ds1302getDateTime(&now);
+        vTaskDelay(1000);
     }
 
+    printf("%s\n", "Alarm triggered!");
     for (int i = 100; i > 0; i--) {
         gpio_put(BUZZER_PIN, 0);
         vTaskDelay(200);
         gpio_put(BUZZER_PIN, 1);
         vTaskDelay(200);
     }
+    delete alarm;
     vTaskDelete(NULL);
 }
 
@@ -455,34 +399,33 @@ void gpio_callback(uint gpio, uint32_t events) {
     last_interrupt_time = current_time;  // Update last valid interrupt time
 
     if (gpio == BTN_UP) {
-        if (Menu::get_current() != nullptr) Menu::get_current()->move_selection(-1);
+        if (Menu::get_current() != nullptr && CURRENT_MODE == MODE_SELECT) Menu::get_current()->move_selection(-1);
     }
     else if (gpio == BTN_DOWN) {
-        if (Menu::get_current() != nullptr) Menu::get_current()->move_selection(1);
+        if (Menu::get_current() != nullptr && CURRENT_MODE == MODE_SELECT) Menu::get_current()->move_selection(1);
     }
     else if (gpio == BTN_HOME) {
-        playing = false;
-        paused = false;
-        mainmenu.set_as_current();
+        paused = !paused;
     }
     else if (gpio == BTN_SELECT) {
         //slide_clear_animation(&lcd);
         TaskHandle_t xHandle;
-        xTaskCreate(launch_execute_task, "launch", 1024, NULL, tskIDLE_PRIORITY, &xHandle);
+        xTaskCreate(launch_execute_task, "launch", 4096, NULL, tskIDLE_PRIORITY, &xHandle);
         vTaskCoreAffinitySet(xHandle, CORE_AFFINITY_0);
         printf("%s\n", "Launched task!");
     }
     else if (gpio == BTN_MODE) {
         if (CURRENT_MODE == MODE_TIME) {
             CURRENT_MODE = MODE_SELECT;
-            musicmenu.set_as_current();
+            mainmenu.set_as_current();
         } else {
             CURRENT_MODE = MODE_TIME;
             render_clear_buffer();
         }
         playing = false;
         paused = false;
-    } else if (gpio == ROTARY_A_PIN) {
+    }
+    else if (gpio == ROTARY_A_PIN) {
         int a_state = gpio_get(ROTARY_A_PIN);
         int b_state = gpio_get(ROTARY_B_PIN);
 
@@ -541,6 +484,104 @@ void button_task(void *pvParameters) {
     gpio_set_irq_enabled(ROTARY_A_PIN, GPIO_IRQ_EDGE_FALL, true);
 
     while (true) vTaskDelay(pdMS_TO_TICKS(500));
+}
+
+void repl_task(void* pvParameters) {
+    char input_buffer[64];
+    int index = 0;
+
+    while (true) {
+        // Wait for USB serial connection
+        while (!tud_cdc_connected()) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+
+        tud_cdc_write_str("\n> ");  // Print prompt
+        tud_cdc_write_flush();
+
+        // Read input
+        while (true) {
+            if (tud_cdc_available()) {
+                char c = tud_cdc_read_char();
+                if (c == '\r' || c == '\n') {  // Enter key pressed
+                    input_buffer[index] = '\0';
+                    tud_cdc_write_str("\n");
+                    tud_cdc_write_flush();
+                    break;
+                } else if (index < (sizeof(input_buffer) - 1)) {
+                    input_buffer[index++] = c;
+                    tud_cdc_write_char(c);  // Echo back
+                    tud_cdc_write_flush();
+                }
+            }
+            vTaskDelay(pdMS_TO_TICKS(10));  // Reduce CPU usage
+        }
+
+        // Parse command
+        if (strncmp(input_buffer, "set_time", 8) == 0) {
+            tud_cdc_write_str("Setting time...\n");
+            // Example: set_time 2025/02/08 14:30:00
+            int year, month, day, hour, minute, second;
+            char date_str[11], time_str[9];
+            int n =sscanf(input_buffer + 9, "%10s %8s", date_str, time_str);
+
+            if (n == 2) {
+                // Parse date: yyyy/mm/dd
+                if (sscanf(date_str, "%d/%d/%d", &year, &month, &day) == 3 &&
+                    sscanf(time_str, "%d:%d:%d", &hour, &minute, &second) == 3) {
+                    // Set time on DS1302
+                    tud_cdc_write_str("Setting time...\n");
+                    set_datetime(year - 2000, month, day, hour, minute, second);
+                    tud_cdc_write_str("Time set!\n");
+                    tud_cdc_write_str("Current time: ");
+                    tud_cdc_write_str(get_time_string().c_str());
+                    tud_cdc_write_char('\n');
+                } else {
+                    tud_cdc_write_str("Invalid date or time format. Use yyyy/mm/dd hh:mm:ss.\n");
+                }
+            } else {
+                tud_cdc_write_str("Invalid command format. Use: set_time yyyy/mm/dd hh:mm:ss\n");
+            }
+        } else if (strcmp(input_buffer, "get_time") == 0) {
+            tud_cdc_write_str("Fetching time...\n");
+            tud_cdc_write_str(get_time_string().c_str());
+            tud_cdc_write_char('\n');
+        } else if (strcmp(input_buffer, "scan_files") == 0) {
+            tud_cdc_write_str("Scanning files...\n");
+            scan_files();
+            for (int i = 0; i < file_count; i++) {
+                tud_cdc_write_str(files[i]);
+                tud_cdc_write_char('\n');
+            }
+        } else if (std::strncmp(input_buffer, "set_alarm", 9) == 0) {
+            tud_cdc_write_str("Setting alarm...\n");
+            // Example: set_alarm 14:30:00
+            uint8_t hour, minute, second;
+            char time_str[9];
+            int n = sscanf(input_buffer + 10, "%8s", time_str);
+            if (n == 1) {
+                // Parse time: hh:mm:ss
+                if (sscanf(time_str, "%d:%d:%d", &hour, &minute, &second) == 3) {
+                    // Set alarm on DS1302
+                    DateTime *alarm = new DateTime();
+                    alarm->year = 0;
+                    alarm->month = 0;
+                    alarm->day = 0;
+                    alarm->hour = hour;
+                    alarm->minute = minute;
+                    alarm->second = second;
+                    xTaskCreate(alarm_task, "alarm", 512, alarm, tskIDLE_PRIORITY, NULL);
+                    tud_cdc_write_str("Alarm set!\n");
+                } else {
+                    tud_cdc_write_str("Invalid time format. Use hh:mm:ss.\n");
+                }
+            }
+        } else {
+            tud_cdc_write_str("Unknown command\n");
+        }
+        tud_cdc_write_flush();
+        index = 0;  // Reset input
+    }
 }
 
 int main() {
@@ -692,7 +733,10 @@ int main() {
 
     int i = 1234;
     mainmenu.add_option("Test", [](void* p) { printf("%s\n", "Test"); }, &i);
-    mainmenu.add_option("Testus", [](void* p) { printf("%s\n", "Testus"); }, nullptr);
+    mainmenu.add_option("Alarm", [](void* p) {
+        printf("%s\n", "Alarm Menu");
+        alarmmenu.set_as_current();
+    }, nullptr);
     mainmenu.add_option("Settings", [](void* p) {
         printf("%s\n", "Settings");
         settingsmenu.set_as_current();
@@ -726,6 +770,51 @@ int main() {
         mainmenu.set_as_current();
     }, nullptr);
 
+    uint8_t alarm_hour = 0;
+    alarmmenu.add_option("Hour: 0", [&alarm_hour](void *p) {
+        uint8_t before = alarm_hour;
+        alarm_hour++;
+        if (alarm_hour > 23) alarm_hour = 0;
+        alarmmenu.modify_option("Hour: " + std::to_string(before), "Hour: " + std::to_string(alarm_hour));
+        printf("%s: %s\n", "Modified option", std::string("Hour: " + std::to_string(alarm_hour)).c_str());
+    }, nullptr);
+
+    uint8_t alarm_minute = 0;
+    alarmmenu.add_option("Minute: 0", [&alarm_minute](void *p) {
+        uint8_t before = alarm_minute;
+        alarm_minute++;
+        if (alarm_minute > 59) alarm_minute = 0;
+        alarmmenu.modify_option("Minute: " + std::to_string(before), "Minute: " + std::to_string(alarm_minute));
+    }, nullptr);
+
+    uint8_t alarm_second = 0;
+    alarmmenu.add_option("Second: 0", [&alarm_second](void *p) {
+        uint8_t before = alarm_second;
+        alarm_second++;
+        if (alarm_second > 59) alarm_second = 0;
+        alarmmenu.modify_option("Second: " + std::to_string(before), "Second: " + std::to_string(alarm_second));
+    }, nullptr);
+
+    alarmmenu.add_option("Set", [&alarm_hour, &alarm_minute, &alarm_second](void *p) {
+        DateTime *alarm = new DateTime();
+        alarm->hour = alarm_hour;
+        alarm->minute = alarm_minute;
+        alarm->second = alarm_second;
+        TaskHandle_t xHandle;
+        xTaskCreate(alarm_task, "alarm", 1024, (void*)alarm, tskIDLE_PRIORITY, &xHandle);
+        vTaskCoreAffinitySet(xHandle, CORE_AFFINITY_0);
+    }, nullptr);
+    alarmmenu.add_option("Remove", [](void *p) {
+        printf("%s\n", "Remove all alarms");
+        for (int i = 0; i < alarm_handles.size(); i++) {
+            vTaskDelete(alarm_handles[i]);
+        }
+        alarm_handles.clear();
+    }, nullptr);
+    alarmmenu.add_option("Back", [](void *p) {
+        mainmenu.set_as_current();
+    }, nullptr);
+
     // sleep_ms(2000);
     lcd.Clear();
     lcd.Home();
@@ -747,16 +836,13 @@ int main() {
     // xTaskCreate(log_accel, "log_accel", 1024, nullptr, tskIDLE_PRIORITY, &xHandle);
     // vTaskCoreAffinitySet(xHandle, CORE_AFFINITY_0);
 
-    xTaskCreate(button_task, "button_input", 128, NULL, tskIDLE_PRIORITY, &xHandle);
+    xTaskCreate(button_task, "button_input", 1024, NULL, tskIDLE_PRIORITY, &xHandle);
     vTaskCoreAffinitySet(xHandle, CORE_AFFINITY_0);
 
     xTaskCreate(render, "render", 1024, nullptr, tskIDLE_PRIORITY, &xHandle);
     vTaskCoreAffinitySet(xHandle, CORE_AFFINITY_0);
 
-    xTaskCreate(repl_task, "repl", 512, nullptr, tskIDLE_PRIORITY, &xHandle);
-    vTaskCoreAffinitySet(xHandle, CORE_AFFINITY_0);
-
-    xTaskCreate(alarm_task, "alarm", 128, nullptr, tskIDLE_PRIORITY, &xHandle);
+    xTaskCreate(repl_task, "repl", 1024, nullptr, tskIDLE_PRIORITY, &xHandle);
     vTaskCoreAffinitySet(xHandle, CORE_AFFINITY_0);
 
     printf("%s\n", "All tasks set up successfully");

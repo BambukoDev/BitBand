@@ -121,6 +121,15 @@ public:
             }
         }
     }
+
+    void modify_option(std::string name, std::string new_name) {
+        for (int i = 0; i < options.size(); i++) {
+            if (options[i].first == name) {
+                options[i].first = new_name;
+                break;
+            }
+        }
+    }
     
 private:
     static Menu *current_menu;
