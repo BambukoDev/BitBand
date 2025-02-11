@@ -23,13 +23,12 @@ void render_display(LCD_I2C &lcd) {
     if (!DISPLAY_CHANGED) return;
 
     // printf("%s\n%s\n%s\n%s\n", DISPLAY_BUFFER[0].c_str(), DISPLAY_BUFFER[1].c_str(), DISPLAY_BUFFER[2].c_str(), DISPLAY_BUFFER[3].c_str());
-    lcd.Clear();
     for (int i = 0; i < LCD_ROWS; i++) {
         // wait for screen to unlock (very dirty workaround but i hope it works - Buko)
-        // while (DISPLAY_LOCK) {
-        //     printf("%s\n", "render wait");
-        //     vTaskDelay(100);
-        // }
+        while (DISPLAY_LOCK) {
+            printf("%s\n", "render wait");
+            vTaskDelay(5);
+        }
         lcd.SetCursor(i, 0);
         // for (int j = 0; j < LCD_COLUMNS; j++) {
         //     if (DISPLAY_BUFFER[i].length() > j) {
@@ -45,7 +44,7 @@ void render_clear_buffer() {
     render_lock_display();
 
     for (int i = 0; i < LCD_ROWS; i++) {
-        DISPLAY_BUFFER[i] = "";
+        DISPLAY_BUFFER[i] = "                    ";
     }
     DISPLAY_CHANGED = true;
 
@@ -91,14 +90,30 @@ void render_set_screen(std::string text, bool force_refresh = false) {
 
 void render_set_row(uint8_t row, std::string text) {
     if (row >= LCD_ROWS) return;
-    if (DISPLAY_BUFFER[row] == text) return;
+    std::string actual_text = text;
+    if (text.length() > LCD_COLUMNS) {
+        actual_text = text.substr(0, LCD_COLUMNS);
+    }
+    if (actual_text.length() < LCD_COLUMNS) {
+        actual_text = actual_text + std::string(LCD_COLUMNS - text.length(), ' ');
+    }
+    if (DISPLAY_BUFFER[row] == actual_text) return;
 
     render_lock_display();
 
-    // printf("%s\n", text.c_str());
+    DISPLAY_BUFFER[row] = actual_text;
+    DISPLAY_CHANGED = true;
+
+    render_unlock_display();
+}
+
+void render_set_row(uint8_t row, std::string text, LCD_I2C &lcd) {
+    if (row >= LCD_ROWS) return;
+    render_lock_display();
 
     DISPLAY_BUFFER[row] = text;
-    DISPLAY_CHANGED = true;
+    lcd.SetCursor(row, 0);
+    lcd.PrintString(text);
 
     render_unlock_display();
 }

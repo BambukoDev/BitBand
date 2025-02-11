@@ -1,6 +1,8 @@
 CompileFlags:
     Add:
         [
+            -Wno-unknown-warning-option
+            -D__unused,
             -Wunused-variable,
             -Winfinite-recursion,
             -Warray-bounds,
@@ -12,5 +14,9 @@ CompileFlags:
             -Wuninitialized,
             -Wunused-label,
             -Wunused-lambda-capture,
+        ]
+    Remove:
+        [
+            -Wunknown-warning-option
         ]
     Compiler: clang++

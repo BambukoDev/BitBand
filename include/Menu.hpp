@@ -21,13 +21,31 @@ public:
             std::advance(iter, 1);
         }
 
+        if (to_render.size() < LCD_ROWS) {
+            render_clear_buffer();
+            render_set_row(0, "ToTinyToRend");
+            return;
+        }
+
+        // printf("1: %s\n", to_render[0].c_str());
+        // printf("2: %s\n", to_render[1].c_str());
+        // printf("3: %s\n", to_render[2].c_str());
+        // printf("4: %s\n", to_render[3].c_str());
+        //
+        // printf("----------------------------");
+
+        // printf("Setting rows\n");
+        // printf("%s: %i", "Current inside view", current_inside_view);
         for (uint i = 0; i < LCD_ROWS; i++) {
             if (i == current_inside_view) {
+                // printf("curr_ins_view");
                 render_set_row(i, ">" + to_render[i]);
             } else {
+                // printf("curr");
                 render_set_row(i, to_render[i]);
             }
         }
+        // printf("Rows set\n");
     }
 
     void execute_current() {

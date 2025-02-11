@@ -11,6 +11,7 @@
 #include <hardware/rtc.h>
 #include <hardware/structs/io_bank0.h>
 #include <hardware/sync.h>
+#include <pico.h>
 #include <pico/multicore.h>
 #include <pico/stdlib.h>
 #include <pico/time.h>
@@ -26,7 +27,6 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
-#include "mp3dec.h"
 
 extern "C" {
     #include "ff.h"
@@ -35,9 +35,12 @@ extern "C" {
 
     #define DR_WAV_IMPLEMENTATION
     #include "dr_wav.h"
-
-    // #include "ds1302.h"
+    #include "ds1302.h"
 }
+
+#include "ADXL345.h"
+
+#include "tusb.h"
 
 // Wireless stuff
 #include <pico/cyw43_arch.h>
@@ -63,7 +66,7 @@ extern "C" {
 #include "OutputList.hpp"
 #include "Menu.hpp"
 #include "LedPulse.hpp"
-#include "button.h"
+#include "Icons.h"
 
 constexpr auto I2C = PICO_DEFAULT_I2C_INSTANCE();
 constexpr auto SDA = PICO_DEFAULT_I2C_SDA_PIN;
@@ -77,6 +80,11 @@ LCD_I2C lcd = LCD_I2C(I2C_ADDRESS, LCD_COLUMNS, LCD_ROWS, I2C, SDA, SCL);
 #define BTN_HOME 19
 #define BTN_SELECT 18
 #define BTN_MODE 22
+#define ROTARY_A_PIN 17  // Pin connected to the A signal of the rotary encoder
+#define ROTARY_B_PIN 16  // Pin connected to the B signal of the rotary encoder
+
+volatile uint32_t last_interrupt_time = 0;  // Debounce timing
+const uint32_t debounce_delay = 400;          // Adjust this delay (milliseconds)
 
 // #include "soundfile.h"
 
@@ -86,18 +94,48 @@ bool playing = false;
 bool paused = false;
 char files[MAX_FILE_COUNT][32];
 int file_count = 0;
-int selected_file = 0;
 
 #define BRIGHTNESS_PIN 6
-#define AUDIO_PIN 9
+#define AUDIO_PIN_LEFT 9
+#define AUDIO_PIN_RIGHT 8
+
+#define BUZZER_PIN 3
+
+enum CURRENT_MODE_T { MODE_TIME, MODE_SELECT };
+CURRENT_MODE_T CURRENT_MODE = MODE_TIME;
 
 Menu mainmenu;
 Menu musicmenu;
+Menu settingsmenu;
 
-void set_rtc_datetime(datetime_t* t = nullptr) {
+uint8_t alarm_hour = 15;
+uint8_t alarm_minute = 50;
+uint8_t alarm_second = 0;
+
+void set_local_datetime(datetime_t* t = nullptr) {
     if (t == nullptr) return;
     rtc_set_datetime(t);
     sleep_us(128); // wait for the clock to take change (around 3 clock cycles)
+}
+
+void set_datetime(uint8_t year, uint8_t month, uint8_t day, uint8_t hour, uint8_t minute, uint8_t second) {
+    DateTime date = {
+        .year = year,
+        .month = month,
+        .day = day,
+        .hour = hour,
+        .minute = minute,
+        .second = second
+    };
+    writeProtect(0);
+    ds1302setDateTime(&date);
+    writeProtect(1);
+}
+
+float get_light_percentage() {
+    adc_select_input(1);
+    float light = (adc_read() * 65535) / 4096;
+    return light;
 }
 
 void check_core(const char* name) {
@@ -118,36 +156,167 @@ void launch_execute_task(void* params) {
 void render(void* params) {
     render_init();
     check_core("render");
+    DateTime now;
 
     while (true) {
         // if (Menu::get_current() != nullptr) Menu::get_current()->render();
-        if (Menu::get_current()) Menu::get_current()->render();
+        if (CURRENT_MODE == MODE_TIME) {
+            ds1302getDateTime(&now);
+            adc_select_input(4);
+            float temperature = 27.0 - ((float)adc_read() * (3.3f / (1 << 12)) - 0.706) / 0.001721;
+            adc_select_input(3);
+            float voltage = (float)adc_read()*3.3f / (65535.0f) * 3.0f;
+            char row1[21];
+            char row2[21];
+            snprintf(row1, sizeof(char[21]), "%.2fC          %.1fV", temperature, voltage);
+            snprintf(row2, sizeof(char[21]), "20%02d-%02d-%02d %02d:%02d:%02d", (int)now.year, (int)now.month, (int)now.day, (int)now.hour, (int)now.minute, (int)now.second);
+            render_clear_buffer();
+            render_set_row(0, row1);
+            render_set_row(1, row2);
+
+            vTaskDelay(1000);
+        } else {
+            if (Menu::get_current()) Menu::get_current()->render();
+        }
+
+        pwm_set_gpio_level(BRIGHTNESS_PIN, get_light_percentage());
+        
         render_display(lcd);
-        vTaskDelay(10);
+        vTaskDelay(100);
     }
 }
 
-void blink_led(void* params) {
-    LedManager led;
-    uint16_t speed = 100;
-    led.setup_led(&speed);
+// void blink_led(void* params) {
+//     // LedManager led;
+//     // uint16_t speed = 100;
+//     // led.setup_led(&speed);
+//     while (true) {
+//         // led.blink_led();
+//         cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, true);
+//         vTaskDelay(500);
+//         cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, false);
+//         vTaskDelay(500);
+//     }
+// }
+
+std::string get_time_string() {
+    DateTime now;
+    ds1302getDateTime(&now);
+    std::string dow = "Noneday";
+    switch (now.dow) {
+        case DOW_MON:
+            dow = "Monday";
+            break;
+        case DOW_TUE:
+            dow = "Tuesday";
+            break;
+        case DOW_WED:
+            dow = "Wednesday";
+            break;
+        case DOW_THU:
+            dow = "Thursday";
+            break;
+        case DOW_FRI:
+            dow = "Friday";
+            break;
+        case DOW_SAT:
+            dow = "Saturday";
+            break;
+        case DOW_SUN:
+            dow = "Sunday";
+            break;
+        default:
+            break;
+    }
+    char buffer[128];
+    snprintf(buffer, sizeof(buffer), "%02d/%02d/20%d %02d:%02d:%02d %s", now.month, now.day, now.year, now.hour, now.minute, now.second, dow.c_str());
+    // printf("%02d/%02d/20%d %02d:%02d:%02d %s\n", now.month, now.day, now.year, now.hour, now.minute, now.second, dow.c_str());
+    return buffer;
+}
+
+void log_accel(void* params) {
+    ADXL345 adxl;
+    adxl.begin(ADXL345_DEFAULT_ADDRESS, &i2c1_inst, 14, 15);
     while (true) {
-        led.blink_led();
-        // cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, true);
-        vTaskDelay(500);
-        // cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, false);
-        vTaskDelay(500);
+        printf("x: %i, y: %i, z: %i\n", adxl.getX(), adxl.getY(), adxl.getZ());
+        vTaskDelay(10000);
+    }
+}
+
+void repl_task(void* pvParameters) {
+    char input_buffer[64];
+    int index = 0;
+
+    while (true) {
+        // Wait for USB serial connection
+        while (!tud_cdc_connected()) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+
+        tud_cdc_write_str("\n> ");  // Print prompt
+        tud_cdc_write_flush();
+
+        // Read input
+        while (true) {
+            if (tud_cdc_available()) {
+                char c = tud_cdc_read_char();
+                if (c == '\r' || c == '\n') {  // Enter key pressed
+                    input_buffer[index] = '\0';
+                    tud_cdc_write_str("\n");
+                    tud_cdc_write_flush();
+                    break;
+                } else if (index < (sizeof(input_buffer) - 1)) {
+                    input_buffer[index++] = c;
+                    tud_cdc_write_char(c);  // Echo back
+                    tud_cdc_write_flush();
+                }
+            }
+            vTaskDelay(pdMS_TO_TICKS(10));  // Reduce CPU usage
+        }
+
+        // Parse command
+        if (strncmp(input_buffer, "set_time", 8) == 0) {
+            tud_cdc_write_str("Setting time...\n");
+            // Example: set_time 2025/02/08 14:30:00
+            int year, month, day, hour, minute, second;
+            char date_str[11], time_str[8];
+            int n =sscanf(input_buffer + 9, "%10s %7s", date_str, time_str);
+
+            if (n == 2) {
+                // Parse date: yyyy/mm/dd
+                if (sscanf(date_str, "%d/%d/%d", &year, &month, &day) == 3 &&
+                    sscanf(time_str, "%d:%d:%d", &hour, &minute, &second) == 3) {
+                    // Set time on DS1302
+                    tud_cdc_write_str("Setting time...\n");
+                    set_datetime(year - 2000, month, day, hour, minute, second);
+                    tud_cdc_write_str("Time set!\n");
+                    tud_cdc_write_str("Current time: ");
+                    tud_cdc_write_str(get_time_string().c_str());
+                    tud_cdc_write_char('\n');
+                } else {
+                    tud_cdc_write_str("Invalid date or time format. Use yyyy/mm/dd hh:mm:ss.\n");
+                }
+            } else {
+                tud_cdc_write_str("Invalid command format. Use: set_time yyyy/mm/dd hh:mm:ss\n");
+            }
+        } else if (strcmp(input_buffer, "get_time") == 0) {
+            tud_cdc_write_str("Fetching time...\n");
+            tud_cdc_write_str(get_time_string().c_str());
+            tud_cdc_write_char('\n');
+        } else {
+            tud_cdc_write_str("Unknown command\n");
+        }
+        tud_cdc_write_flush();
+        index = 0;  // Reset input
     }
 }
 
 void log_time(void* params) {
-    while(true) {
-        datetime_t t;
-        if (!rtc_get_datetime(&t)) {
-            printf("%s", "RTC not running!\n");
-        }
-        // printf("%d/%d/%d %d:%d:%d\n", t.year, t.month, t.day, t.hour, t.min, t.sec);
-        vTaskDelay(1000);
+    DateTime now;
+    while (true) {
+        std::string time = get_time_string();
+        printf("%s\n", time.c_str());
+        vTaskDelay(10000);  // one second
     }
 }
 
@@ -182,6 +351,11 @@ drwav_bool32 wav_seek_callback(void* pUserData, int offset, drwav_seek_origin or
     }
 }
 
+void reset_speakers() {
+    pwm_set_gpio_level(AUDIO_PIN_LEFT, 0);
+    pwm_set_gpio_level(AUDIO_PIN_RIGHT, 0);
+}
+
 void play_wav_task(void *pvParameters) {
     if (playing) vTaskDelete(NULL);
     check_core("music");
@@ -199,29 +373,23 @@ void play_wav_task(void *pvParameters) {
             uint32_t elapsed_frames = 0, last_update_time = 0;
             lcd.Clear();
 
-            char bar[22] = "[                   ]";
+            char bar[21] = "[                  ]";
             char time_display[16];
+
+            // Get the sample wait time in microseconds
+            uint32_t wait_time_us = 920000 / wav.sampleRate;
 
             while (playing && drwav_read_pcm_frames(&wav, 1, sampleBuffer) > 0) {
                 while (paused) vTaskDelay(10);
 
-                if (wav.channels == 2) {
-                    outputSample = ((int16_t)sampleBuffer[0] + (int16_t)sampleBuffer[1]) / 2;
-                } else {
-                    outputSample = sampleBuffer[0];
-                }
-                uint8_t pwmValue = (outputSample >> 8) + 128;
-                pwm_set_gpio_level(AUDIO_PIN, pwmValue);
-                busy_wait_us(880000 / wav.sampleRate);
-                elapsed_frames++;
-
+                // Update the screen every second
                 uint32_t elapsed_seconds = elapsed_frames / wav.sampleRate;
                 if (elapsed_seconds != last_update_time) {
                     last_update_time = elapsed_seconds;
 
-                    int progress = (elapsed_frames * 20) / wav.totalPCMFrameCount;
+                    int progress = (elapsed_frames * 18) / wav.totalPCMFrameCount;
                     memset(bar + 1, '=', progress);
-                    memset(bar + 1 + progress, ' ', 20 - progress);
+                    memset(bar + 1 + progress, ' ', 18 - progress);
 
                     uint32_t elapsed_min = elapsed_seconds / 60, elapsed_sec = elapsed_seconds % 60;
                     uint32_t total_min = (wav.totalPCMFrameCount / wav.sampleRate) / 60;
@@ -233,43 +401,104 @@ void play_wav_task(void *pvParameters) {
                     render_set_row(2, playing ? "Playing" : "Paused");
                     render_set_row(3, (char*)pvParameters);
                 }
+
+                uint16_t pwmValueLeft = 0;
+                uint16_t pwmValueRight = 0;
+
+                if (wav.channels == 2) {
+                    pwmValueLeft = (sampleBuffer[0] >> 8) + 128;
+                    pwmValueRight = (sampleBuffer[1] >> 8) + 128;
+                } else {
+                    pwmValueLeft = (sampleBuffer[0] >> 8) + 128;
+                    pwmValueRight = (sampleBuffer[0] >> 8) + 128;
+                }
+                pwm_set_gpio_level(AUDIO_PIN_LEFT, pwmValueLeft);
+                pwm_set_gpio_level(AUDIO_PIN_RIGHT, pwmValueRight);
+                busy_wait_us(wait_time_us);
+                elapsed_frames++;
             }
             drwav_uninit(&wav);
         }
         f_close(&file);
     }
+    printf("%s", "Stopping audio playback");
     playing = false;
+    reset_speakers();
     musicmenu.set_as_current();
     vTaskDelete(NULL);
 }
 
-void logic_task() {
-    check_core("logic");
-}
-
-void lcd_update() {
-    lcd.PrintString("Select track:");
-    render_set_row(0, "Select track:");
-    for (int i = 0; i < file_count && i < 3; i++) {
-        std::string line = (i == selected_file ? "> " : "  ") + std::string(files[i]);
-        render_set_row(i + 1, line);
+void alarm_task(void *params) {
+    DateTime now;
+    ds1302getDateTime(&now);
+    while (now.hour != alarm_hour && now.minute != alarm_minute && now.second != alarm_second) {
+        vTaskDelay(5000);
+        ds1302getDateTime(&now);
     }
+
+    for (int i = 100; i > 0; i--) {
+        gpio_put(BUZZER_PIN, 0);
+        vTaskDelay(200);
+        gpio_put(BUZZER_PIN, 1);
+        vTaskDelay(200);
+    }
+    vTaskDelete(NULL);
 }
 
 void gpio_callback(uint gpio, uint32_t events) {
-    if (gpio == BTN_UP) Menu::get_current()->move_selection(-1);
-    else if (gpio == BTN_DOWN) Menu::get_current()->move_selection(1);
+    uint32_t current_time = to_ms_since_boot(get_absolute_time());
+
+    if (current_time - last_interrupt_time < debounce_delay) {
+        return;  // Ignore bouncing
+    }
+
+    last_interrupt_time = current_time;  // Update last valid interrupt time
+
+    if (gpio == BTN_UP) {
+        if (Menu::get_current() != nullptr) Menu::get_current()->move_selection(-1);
+    }
+    else if (gpio == BTN_DOWN) {
+        if (Menu::get_current() != nullptr) Menu::get_current()->move_selection(1);
+    }
     else if (gpio == BTN_HOME) {
         playing = false;
+        paused = false;
         mainmenu.set_as_current();
     }
-    else if (gpio == BTN_MODE) paused = !paused;
     else if (gpio == BTN_SELECT) {
         //slide_clear_animation(&lcd);
         TaskHandle_t xHandle;
         xTaskCreate(launch_execute_task, "launch", 1024, NULL, tskIDLE_PRIORITY, &xHandle);
         vTaskCoreAffinitySet(xHandle, CORE_AFFINITY_0);
         printf("%s\n", "Launched task!");
+    }
+    else if (gpio == BTN_MODE) {
+        if (CURRENT_MODE == MODE_TIME) {
+            CURRENT_MODE = MODE_SELECT;
+            musicmenu.set_as_current();
+        } else {
+            CURRENT_MODE = MODE_TIME;
+            render_clear_buffer();
+        }
+        playing = false;
+        paused = false;
+    } else if (gpio == ROTARY_A_PIN) {
+        int a_state = gpio_get(ROTARY_A_PIN);
+        int b_state = gpio_get(ROTARY_B_PIN);
+
+        if (a_state == 0) {  // Only trigger when A falls
+            if (b_state == 1) {
+                // Clockwise movement (scroll down)
+                if (Menu::get_current() != nullptr) {
+                    Menu::get_current()->move_selection(-1);
+                }
+            } else {
+                // Counterclockwise movement (scroll up)
+                if (Menu::get_current() != nullptr) {
+                    Menu::get_current()->move_selection(1);
+                }
+            }
+        }
     }
     printf("%s\n", "Button callback");
 }
@@ -295,11 +524,21 @@ void button_task(void *pvParameters) {
     gpio_pull_up(BTN_SELECT);
     gpio_pull_up(BTN_MODE);
 
+    // Setup rotary encoder
+    gpio_init(ROTARY_A_PIN);
+    gpio_init(ROTARY_B_PIN);
+    gpio_set_dir(ROTARY_A_PIN, GPIO_IN);
+    gpio_set_dir(ROTARY_B_PIN, GPIO_IN);
+    gpio_pull_up(ROTARY_A_PIN);
+    gpio_pull_up(ROTARY_B_PIN);
+
     gpio_set_irq_enabled_with_callback(BTN_UP, GPIO_IRQ_EDGE_FALL, true, &gpio_callback);
     gpio_set_irq_enabled(BTN_DOWN, GPIO_IRQ_EDGE_FALL, true);
     gpio_set_irq_enabled(BTN_HOME, GPIO_IRQ_EDGE_FALL, true);
     gpio_set_irq_enabled(BTN_SELECT, GPIO_IRQ_EDGE_FALL, true);
     gpio_set_irq_enabled(BTN_MODE, GPIO_IRQ_EDGE_FALL, true);
+
+    gpio_set_irq_enabled(ROTARY_A_PIN, GPIO_IRQ_EDGE_FALL, true);
 
     while (true) vTaskDelay(pdMS_TO_TICKS(500));
 }
@@ -318,6 +557,11 @@ int main() {
     uint brightness_pin_slice = pwm_gpio_to_slice_num(BRIGHTNESS_PIN);
     pwm_init(brightness_pin_slice, &backlight_pwm_config, true);
     pwm_set_gpio_level(BRIGHTNESS_PIN, 65535/4);
+
+    // Setup buzzer
+    gpio_init(BUZZER_PIN);
+    gpio_set_dir(BUZZER_PIN, true);
+    gpio_put(BUZZER_PIN, 1);
 
     // gpio_init(BRIGHTNESS_PIN);
     // gpio_set_dir(BRIGHTNESS_PIN, true);
@@ -341,9 +585,32 @@ int main() {
 
     printf("%s", "Setting up Pico modules\n");
 
+    ds1302init(0, 2, 1);
+    
+    // writeProtect(0);
+    // DateTime now = {
+    //     .year = 25,
+    //     .month = 2,
+    //     .day = 7,
+    //     .hour = 17,
+    //     .minute = 30,
+    //     .second = 0,
+    //     .dow = DOW_FRI
+    // };
+    // ds1302setDateTime(&now);
+
     rtc_init();
-    datetime_t t = { .year = 2025, .month = 2, .day = 5, .hour = 12, .min = 00, .sec = 00};
-    set_rtc_datetime(&t);
+    DateTime date;
+    ds1302getDateTime(&date);
+    datetime_t t = {
+        .year = (int8_t)date.year,
+        .month = (int8_t)date.month,
+        .day = (int8_t)date.day,
+        .hour = (int8_t)date.hour,
+        .min = (int8_t)date.minute,
+        .sec = (int8_t)date.second
+    };
+    set_local_datetime(&t);
     if (!rtc_running()) {
         olist.push("RTC failed");
         olist.render();
@@ -375,6 +642,9 @@ int main() {
         return -3;
     }
 
+    olist.push("SD mount success");
+    olist.render();
+
     // pwm_clear_irq(audio_pin_slice);
     // pwm_set_irq_enabled(audio_pin_slice, true);
 
@@ -397,13 +667,20 @@ int main() {
     // pwm_config_set_clkdiv(&pwm_config, 20.0f);
 
 
-    gpio_set_function(AUDIO_PIN, GPIO_FUNC_PWM);
-    uint audio_pin_slice = pwm_gpio_to_slice_num(AUDIO_PIN);
-    pwm_set_wrap(audio_pin_slice, 255);
-    pwm_set_enabled(audio_pin_slice, true);
-    // pwm_init(audio_pin_slice, nullptr, true);
+    gpio_set_function(AUDIO_PIN_LEFT, GPIO_FUNC_PWM);
+    uint audio_pin_left_slice = pwm_gpio_to_slice_num(AUDIO_PIN_LEFT);
+    pwm_set_wrap(audio_pin_left_slice, 255);
+    pwm_set_clkdiv(audio_pin_left_slice, 2.44f);
+    pwm_set_enabled(audio_pin_left_slice, true);
 
-    pwm_set_gpio_level(AUDIO_PIN, 0);
+    gpio_set_function(AUDIO_PIN_RIGHT, GPIO_FUNC_PWM);
+    uint audio_pin_right_slice = pwm_gpio_to_slice_num(AUDIO_PIN_RIGHT);
+    pwm_set_wrap(audio_pin_right_slice, 255);
+    pwm_set_clkdiv(audio_pin_right_slice, 2.44f);
+    pwm_set_enabled(audio_pin_right_slice, true);
+
+    pwm_set_gpio_level(AUDIO_PIN_LEFT, 0);
+    pwm_set_gpio_level(AUDIO_PIN_RIGHT, 0);
 
     scan_files();
 
@@ -416,7 +693,10 @@ int main() {
     int i = 1234;
     mainmenu.add_option("Test", [](void* p) { printf("%s\n", "Test"); }, &i);
     mainmenu.add_option("Testus", [](void* p) { printf("%s\n", "Testus"); }, nullptr);
-    mainmenu.add_option("Testus1", [](void* p) { printf("%s\n", "Testus1"); }, nullptr);
+    mainmenu.add_option("Settings", [](void* p) {
+        printf("%s\n", "Settings");
+        settingsmenu.set_as_current();
+    }, nullptr);
     mainmenu.add_option("Testus2", [](void* p) { printf("%s\n", "Testus2"); }, nullptr);
     mainmenu.add_option("Testus3", [](void* p) { printf("%s\n", "Testus3"); }, nullptr);
     mainmenu.add_option("Music", [](void* p) {
@@ -429,39 +709,62 @@ int main() {
     printf("%s: %i\n", "File count", file_count);
     for (int i = 0; i < file_count; i++) {
         printf("%s %s\n", "Adding menu", files[i]);
+        int *f_num = new int(i);
         musicmenu.add_option(files[i], [](void* p) {
-            int f = *(int*)p;
+            int *f = (int*)p;
             printf("%s: %i\n", "Playing music track", f);
             TaskHandle_t xHandle;
-            xTaskCreate(play_wav_task, "PlayWav", 4096, (void*)files[2], 2, &xHandle);
+            // xTaskCreate(play_wav_task, "PlayWav", 4096, (void*)files[2], 2, &xHandle);
+            xTaskCreate(play_wav_task, "PlayWav", 4096, (void*)files[*f], 2, &xHandle);
             vTaskCoreAffinitySet(xHandle, CORE_AFFINITY_1);
             Menu::remove_current();
-            render_clear_buffer();
-        }, (void*)&i);
+            // render_clear_buffer();
+            lcd.Clear();
+        }, (void*)f_num);
     }
+    musicmenu.add_option("Back", [](void *p) {
+        mainmenu.set_as_current();
+    }, nullptr);
 
     // sleep_ms(2000);
     lcd.Clear();
     lcd.Home();
-    timed_print(&lcd, "Test string!", 12, 50);
+    render_set_row(0, "-=-=-=-=-=-=-=-=-=-=", lcd);
+    render_set_row(1, "|     BitBand      |", lcd);
+    render_set_row(2, "|    by Bambuko    |", lcd);
+    render_set_row(3, "=-=-=-=-=-=-=-=-=-=-", lcd);
+    sleep_ms(3000);
 
     TaskHandle_t xHandle;
 
     // xTaskCreate(main_thread, "main", 1024, &lcd, tskIDLE_PRIORITY + 4UL, nullptr);
-    xTaskCreate(blink_led, "blink", 128, NULL, tskIDLE_PRIORITY, &xHandle);
-    vTaskCoreAffinitySet(xHandle, CORE_AFFINITY_0);
+    // xTaskCreate(blink_led, "blink", 128, NULL, tskIDLE_PRIORITY, &xHandle);
+    // vTaskCoreAffinitySet(xHandle, CORE_AFFINITY_0);
 
-    xTaskCreate(log_time, "log_time", 256, NULL, tskIDLE_PRIORITY, &xHandle);
-    vTaskCoreAffinitySet(xHandle, CORE_AFFINITY_0);
+    // xTaskCreate(log_time, "log_time", 256, NULL, tskIDLE_PRIORITY, &xHandle);
+    // vTaskCoreAffinitySet(xHandle, CORE_AFFINITY_0);
 
-    xTaskCreate(button_task, "button_input", 256, NULL, tskIDLE_PRIORITY, &xHandle);
+    // xTaskCreate(log_accel, "log_accel", 1024, nullptr, tskIDLE_PRIORITY, &xHandle);
+    // vTaskCoreAffinitySet(xHandle, CORE_AFFINITY_0);
+
+    xTaskCreate(button_task, "button_input", 128, NULL, tskIDLE_PRIORITY, &xHandle);
     vTaskCoreAffinitySet(xHandle, CORE_AFFINITY_0);
 
     xTaskCreate(render, "render", 1024, nullptr, tskIDLE_PRIORITY, &xHandle);
     vTaskCoreAffinitySet(xHandle, CORE_AFFINITY_0);
 
+    xTaskCreate(repl_task, "repl", 512, nullptr, tskIDLE_PRIORITY, &xHandle);
+    vTaskCoreAffinitySet(xHandle, CORE_AFFINITY_0);
+
+    xTaskCreate(alarm_task, "alarm", 128, nullptr, tskIDLE_PRIORITY, &xHandle);
+    vTaskCoreAffinitySet(xHandle, CORE_AFFINITY_0);
+
     printf("%s\n", "All tasks set up successfully");
 
     vTaskStartScheduler();
+
+    while (true) {
+        tight_loop_contents();
+    }
     return 0;
 }

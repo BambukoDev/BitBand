@@ -59,6 +59,7 @@ include_directories(
         lib/Pico-libs/Keypad Matrix
         lib/libwave/
         lib/pico-ds1302/
+        lib/ADXL345/
 )
 
 file(GLOB SOURCES_C "./source/*.c")
@@ -73,7 +74,7 @@ add_executable(HandWatch
   lib/tiny-json/tiny-json.c
   lib/picomp3lib/interface/music_file.c
   lib/Pico-I2C-LCD/LCD_I2C.cpp
-  lib/pico-ds1302/ds1302.c
+  lib/ADXL345/ADXL345.cpp
 )
 
 add_subdirectory(lib/no-OS-FatFS-SD-SPI-RPi-Pico/FatFs_SPI build)
@@ -83,6 +84,8 @@ add_subdirectory(lib/json-maker/src)
 add_subdirectory(lib/picomp3lib/src)
 
 add_subdirectory(lib/libwave/)
+
+add_subdirectory(lib/pico-ds1302/)
 
 add_subdirectory("lib/Pico-libs/Battery Check")
 add_subdirectory("lib/Pico-libs/Button/")
@@ -119,6 +122,7 @@ target_link_libraries(HandWatch
         picomp3lib
         FreeRTOS-Kernel-Heap4
         wave
+        ds1302pico
 )
 
 pico_add_extra_outputs(HandWatch)

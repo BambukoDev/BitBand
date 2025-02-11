@@ -3,3 +3,4 @@
 build
 include/wifi_data.h
 .vscode
+.cache
