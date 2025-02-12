@@ -67,6 +67,7 @@ extern "C" {
 #include "Menu.hpp"
 #include "LedPulse.hpp"
 #include "Icons.h"
+#include "Tetris.hpp"
 
 constexpr auto I2C = PICO_DEFAULT_I2C_INSTANCE();
 constexpr auto SDA = PICO_DEFAULT_I2C_SDA_PIN;
@@ -486,6 +487,17 @@ void button_task(void *pvParameters) {
     while (true) vTaskDelay(pdMS_TO_TICKS(500));
 }
 
+void game_tetris_task(void *params) {
+    check_core("tetris");
+    Tetris tetris;
+    tetris.init();
+
+    while (true) {
+        tetris.tick();
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+}
+
 void repl_task(void* pvParameters) {
     char input_buffer[64];
     int index = 0;
@@ -576,6 +588,10 @@ void repl_task(void* pvParameters) {
                     tud_cdc_write_str("Invalid time format. Use hh:mm:ss.\n");
                 }
             }
+        } else if (std::strcmp(input_buffer, "start_game") == 0) {
+            tud_cdc_write_str("Starting game...\n");
+            xTaskCreate(game_tetris_task, "game", 4096, NULL, tskIDLE_PRIORITY, NULL);
+            Menu::remove_current();
         } else {
             tud_cdc_write_str("Unknown command\n");
         }
@@ -770,6 +786,7 @@ int main() {
         mainmenu.set_as_current();
     }, nullptr);
 
+    // TODO: Debug why sometimes on a key press in the time change functions crashes the board
     uint8_t alarm_hour = 0;
     alarmmenu.add_option("Hour: 0", [&alarm_hour](void *p) {
         uint8_t before = alarm_hour;
@@ -785,6 +802,7 @@ int main() {
         alarm_minute++;
         if (alarm_minute > 59) alarm_minute = 0;
         alarmmenu.modify_option("Minute: " + std::to_string(before), "Minute: " + std::to_string(alarm_minute));
+        printf("%s: %s\n", "Modified option", std::string("Minute: " + std::to_string(alarm_minute)).c_str());
     }, nullptr);
 
     uint8_t alarm_second = 0;
@@ -793,6 +811,7 @@ int main() {
         alarm_second++;
         if (alarm_second > 59) alarm_second = 0;
         alarmmenu.modify_option("Second: " + std::to_string(before), "Second: " + std::to_string(alarm_second));
+        printf("%s: %s\n", "Modified option", std::string("Second: " + std::to_string(alarm_second)).c_str());
     }, nullptr);
 
     alarmmenu.add_option("Set", [&alarm_hour, &alarm_minute, &alarm_second](void *p) {
