@@ -27,6 +27,7 @@
 #include <cstdio>
 #include <cstring>
 #include <vector>
+#include "class/cdc/cdc_device.h"
 
 extern "C" {
     #include "ff.h"
@@ -165,7 +166,7 @@ void render(void* params) {
             adc_select_input(4);
             float temperature = 27.0 - ((float)adc_read() * (3.3f / (1 << 12)) - 0.706) / 0.001721;
             adc_select_input(3);
-            float voltage = (float)adc_read()*3.3f / (65535.0f) * 3.0f;
+            float voltage = (float)adc_read() / 10.0f;
             char row1[21];
             char row2[21];
             snprintf(row1, sizeof(char[21]), "%.2fC          %.1fV", temperature, voltage);
@@ -592,6 +593,14 @@ void repl_task(void* pvParameters) {
             tud_cdc_write_str("Starting game...\n");
             xTaskCreate(game_tetris_task, "game", 4096, NULL, tskIDLE_PRIORITY, NULL);
             Menu::remove_current();
+        } else if (std::strcmp(input_buffer, "reset_display") == 0) {
+            tud_cdc_write_str("Resetting display...\n");
+            lcd.DisplayOff();
+            lcd.BacklightOff();
+            sleep_ms(5000);
+            lcd.BacklightOn();
+            lcd.DisplayOn();
+            tud_cdc_write_str("Display reset successfull\n");
         } else {
             tud_cdc_write_str("Unknown command\n");
         }
@@ -822,6 +831,7 @@ int main() {
         TaskHandle_t xHandle;
         xTaskCreate(alarm_task, "alarm", 1024, (void*)alarm, tskIDLE_PRIORITY, &xHandle);
         vTaskCoreAffinitySet(xHandle, CORE_AFFINITY_0);
+        alarm_handles.push_back(xHandle);
     }, nullptr);
     alarmmenu.add_option("Remove", [](void *p) {
         printf("%s\n", "Remove all alarms");
@@ -841,7 +851,7 @@ int main() {
     render_set_row(1, "|     BitBand      |", lcd);
     render_set_row(2, "|    by Bambuko    |", lcd);
     render_set_row(3, "=-=-=-=-=-=-=-=-=-=-", lcd);
-    sleep_ms(3000);
+    sleep_ms(1000);
 
     TaskHandle_t xHandle;
 
