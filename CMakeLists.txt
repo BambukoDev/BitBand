@@ -75,6 +75,7 @@ add_executable(HandWatch
   lib/picomp3lib/interface/music_file.c
   lib/Pico-I2C-LCD/LCD_I2C.cpp
   lib/ADXL345/ADXL345.cpp
+  lib/Pico-I2C-LCD/LCD_I2C.cpp
 )
 
 add_subdirectory(lib/no-OS-FatFS-SD-SPI-RPi-Pico/FatFs_SPI build)

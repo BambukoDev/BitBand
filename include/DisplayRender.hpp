@@ -21,14 +21,11 @@ void render_unlock_display() { DISPLAY_LOCK = false; }
 
 void render_display(LCD_I2C &lcd) {
     if (!DISPLAY_CHANGED) return;
+    // printf("%s", "Rendering...");
 
     // printf("%s\n%s\n%s\n%s\n", DISPLAY_BUFFER[0].c_str(), DISPLAY_BUFFER[1].c_str(), DISPLAY_BUFFER[2].c_str(), DISPLAY_BUFFER[3].c_str());
     for (int i = 0; i < LCD_ROWS; i++) {
         // wait for screen to unlock (very dirty workaround but i hope it works - Buko)
-        while (DISPLAY_LOCK) {
-            printf("%s\n", "render wait");
-            vTaskDelay(5);
-        }
         lcd.SetCursor(i, 0);
         // for (int j = 0; j < LCD_COLUMNS; j++) {
         //     if (DISPLAY_BUFFER[i].length() > j) {
@@ -116,4 +113,15 @@ void render_set_row(uint8_t row, std::string text, LCD_I2C &lcd) {
     lcd.PrintString(text);
 
     render_unlock_display();
+}
+
+bool check_i2c_lcd() {
+    uint8_t dummy_cmd = 0x00;  // A harmless command to test I2C
+    int result = i2c_write_blocking(PICO_DEFAULT_I2C_INSTANCE(), 0x27, &dummy_cmd, 1, false);
+
+    if (result < 0) {
+        printf("%s", "I2C Error: LCD not responding!\n");
+        return false;  // I2C error detected
+    }
+    return true;  // I2C communication is working
 }

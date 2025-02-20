@@ -102,6 +102,7 @@ int file_count = 0;
 #define AUDIO_PIN_RIGHT 8
 
 #define BUZZER_PIN 3
+#define DISPLAY_RESET_PIN 7
 
 enum CURRENT_MODE_T { MODE_TIME, MODE_SELECT };
 CURRENT_MODE_T CURRENT_MODE = MODE_TIME;
@@ -110,6 +111,8 @@ Menu mainmenu;
 Menu musicmenu;
 Menu settingsmenu;
 Menu alarmmenu;
+
+bool SUPRESS_RENDER = false;
 
 std::vector<TaskHandle_t> alarm_handles;
 
@@ -160,6 +163,9 @@ void render(void* params) {
     DateTime now;
 
     while (true) {
+        while (SUPRESS_RENDER) {
+            vTaskDelay(100);
+        }
         // if (Menu::get_current() != nullptr) Menu::get_current()->render();
         if (CURRENT_MODE == MODE_TIME) {
             ds1302getDateTime(&now);
@@ -176,14 +182,14 @@ void render(void* params) {
             render_set_row(1, row2);
 
             vTaskDelay(1000);
-        } else {
+        } else if (CURRENT_MODE == MODE_SELECT){
             if (Menu::get_current()) Menu::get_current()->render();
+        } else {
+            render_set_row(0, "ERROR: Invalid mode");
         }
-
         pwm_set_gpio_level(BRIGHTNESS_PIN, get_light_percentage());
-        
         render_display(lcd);
-        vTaskDelay(100);
+        vTaskDelay(10000/16);
     }
 }
 
@@ -306,6 +312,9 @@ void play_wav_task(void *pvParameters) {
             uint16_t outputSample;
             uint32_t elapsed_frames = 0, last_update_time = 0;
             lcd.Clear();
+            render_clear_buffer();
+            render_set_row(0, "Loading...");
+            vTaskDelay(10);
 
             char bar[21] = "[                  ]";
             char time_display[16];
@@ -391,6 +400,53 @@ void alarm_task(void *params) {
     vTaskDelete(NULL);
 }
 
+void reset_display_task(void* params) {
+    SUPRESS_RENDER = true;
+    lcd.DisplayOff();
+    lcd.BacklightOff();
+    // sleep_ms(5000);
+    lcd.Clear();
+    lcd.Home();
+    lcd.SetTextLeftToRight();
+    lcd.CursorBlinkOff();
+    lcd.CursorOff();
+    // lcd.Send_Command(0x30);
+    // sleep_ms(5);
+    // lcd.Send_Command(0x30);
+    // sleep_ms(1);
+    // lcd.Send_Command(0x30);
+    // sleep_ms(1);
+    // lcd.Send_Command(0x20);
+    // sleep_ms(1);
+    // lcd.Send_Command(0x28);
+    // lcd.Send_Command(0x08);
+    // lcd.Send_Command(0x01);
+    // sleep_ms(2);
+    // lcd.Send_Command(0x06);
+    // lcd.Send_Command(0x0C);
+    lcd = LCD_I2C(I2C_ADDRESS, LCD_COLUMNS, LCD_ROWS, I2C, SDA, SCL);
+    // lcd.Init();
+    vTaskDelay(5000);
+    lcd.BacklightOn();
+    lcd.DisplayOn();
+    lcd.PrintString("Display reset");
+    vTaskDelay(5000);
+    SUPRESS_RENDER = false;
+    vTaskDelete(NULL);
+}
+
+void lcd_health_monitor_task(void* param) {
+    while (true) {
+        if (!check_i2c_lcd()) {
+            tud_cdc_write_str("I2C Error detected! Resetting LCD...\n");
+            TaskHandle_t xHandle;
+            xTaskCreate(reset_display_task, "reset_display", 512, nullptr, tskIDLE_PRIORITY, &xHandle);
+            vTaskCoreAffinitySet(xHandle, CORE_AFFINITY_0);
+        }
+        vTaskDelay(10000);  // Check every 5 seconds
+    }
+}
+
 void gpio_callback(uint gpio, uint32_t events) {
     uint32_t current_time = to_ms_since_boot(get_absolute_time());
 
@@ -444,6 +500,10 @@ void gpio_callback(uint gpio, uint32_t events) {
                 }
             }
         }
+    } else if (gpio == DISPLAY_RESET_PIN) {
+        TaskHandle_t xHandle;
+        xTaskCreate(reset_display_task, "reset_display", 512, NULL, tskIDLE_PRIORITY, &xHandle);
+        vTaskCoreAffinitySet(xHandle, CORE_AFFINITY_0);
     }
     printf("%s\n", "Button callback");
 }
@@ -469,6 +529,10 @@ void button_task(void *pvParameters) {
     gpio_pull_up(BTN_SELECT);
     gpio_pull_up(BTN_MODE);
 
+    gpio_init(DISPLAY_RESET_PIN);
+    gpio_set_dir(DISPLAY_RESET_PIN, GPIO_IN);
+    gpio_pull_up(DISPLAY_RESET_PIN);
+
     // Setup rotary encoder
     gpio_init(ROTARY_A_PIN);
     gpio_init(ROTARY_B_PIN);
@@ -482,8 +546,9 @@ void button_task(void *pvParameters) {
     gpio_set_irq_enabled(BTN_HOME, GPIO_IRQ_EDGE_FALL, true);
     gpio_set_irq_enabled(BTN_SELECT, GPIO_IRQ_EDGE_FALL, true);
     gpio_set_irq_enabled(BTN_MODE, GPIO_IRQ_EDGE_FALL, true);
+    gpio_set_irq_enabled(DISPLAY_RESET_PIN, GPIO_IRQ_EDGE_FALL, true);
 
-    gpio_set_irq_enabled(ROTARY_A_PIN, GPIO_IRQ_EDGE_FALL, true);
+    gpio_set_irq_enabled(ROTARY_A_PIN, GPIO_IRQ_EDGE_RISE, true);
 
     while (true) vTaskDelay(pdMS_TO_TICKS(500));
 }
@@ -595,12 +660,29 @@ void repl_task(void* pvParameters) {
             Menu::remove_current();
         } else if (std::strcmp(input_buffer, "reset_display") == 0) {
             tud_cdc_write_str("Resetting display...\n");
-            lcd.DisplayOff();
-            lcd.BacklightOff();
-            sleep_ms(5000);
-            lcd.BacklightOn();
-            lcd.DisplayOn();
-            tud_cdc_write_str("Display reset successfull\n");
+            xTaskHandle xHandle;
+            xTaskCreate(reset_display_task, "reset_display", 512, nullptr, tskIDLE_PRIORITY, &xHandle);
+            vTaskCoreAffinitySet(xHandle, CORE_AFFINITY_0);
+        } else if (std::strcmp(input_buffer, "help") == 0) {
+            tud_cdc_write_str("Available commands:\n");
+            tud_cdc_write_str("set_time yyyy/mm/dd hh:mm:ss - Sets the time\n");
+            tud_cdc_write_str("get_time - Get the current time from DS1302 module\n");
+            tud_cdc_write_str("scan_files - Rescan music files (not yet implemented)\n");
+            tud_cdc_write_str("set_alarm hh:mm:ss - Sets an alarm\n");
+            tud_cdc_write_str("start_game - Starts the tetris game (not yet implemented)\n");
+            tud_cdc_write_str("reset_display - Resets the display\n");
+            tud_cdc_write_str("force_display_refresh - Refreshes the display\n");
+            tud_cdc_write_str("lock_display - Locks the display\n");
+            tud_cdc_write_str("unlock_display - Unlocks the display\n");
+            tud_cdc_write_str("help - Displays this screen\n");
+            tud_cdc_write_char('\n');
+        } else if (std::strcmp(input_buffer, "force_display_refresh") == 0) {
+            DISPLAY_CHANGED = true;
+            render_display(lcd);
+        } else if (std::strcmp(input_buffer, "lock_display") == 0) {
+            SUPRESS_RENDER = true;
+        } else if (std::strcmp(input_buffer, "unlock_display") == 0) {
+            SUPRESS_RENDER = false;
         } else {
             tud_cdc_write_str("Unknown command\n");
         }
@@ -865,7 +947,7 @@ int main() {
     // xTaskCreate(log_accel, "log_accel", 1024, nullptr, tskIDLE_PRIORITY, &xHandle);
     // vTaskCoreAffinitySet(xHandle, CORE_AFFINITY_0);
 
-    xTaskCreate(button_task, "button_input", 1024, NULL, tskIDLE_PRIORITY, &xHandle);
+    xTaskCreate(button_task, "button_input", 1024, nullptr, tskIDLE_PRIORITY, &xHandle);
     vTaskCoreAffinitySet(xHandle, CORE_AFFINITY_0);
 
     xTaskCreate(render, "render", 1024, nullptr, tskIDLE_PRIORITY, &xHandle);
@@ -873,6 +955,9 @@ int main() {
 
     xTaskCreate(repl_task, "repl", 1024, nullptr, tskIDLE_PRIORITY, &xHandle);
     vTaskCoreAffinitySet(xHandle, CORE_AFFINITY_0);
+
+    // xTaskCreate(lcd_health_monitor_task, "health_monitor", 1024, nullptr, tskIDLE_PRIORITY, &xHandle);
+    // vTaskCoreAffinitySet(xHandle, CORE_AFFINITY_0);
 
     printf("%s\n", "All tasks set up successfully");
 
