@@ -85,8 +85,15 @@ LCD_I2C lcd = LCD_I2C(I2C_ADDRESS, LCD_COLUMNS, LCD_ROWS, I2C, SDA, SCL);
 #define ROTARY_A_PIN 17  // Pin connected to the A signal of the rotary encoder
 #define ROTARY_B_PIN 16  // Pin connected to the B signal of the rotary encoder
 
+volatile int encoderPos = 0;
+volatile uint8_t lastState = 0;
+
+uint8_t readEncoderState() {
+    return (gpio_get(ROTARY_A_PIN) << 1) | gpio_get(ROTARY_B_PIN);
+}
+
 volatile uint32_t last_interrupt_time = 0;  // Debounce timing
-const uint32_t debounce_delay = 300;          // Adjust this delay (milliseconds)
+const uint32_t debounce_delay = 300;
 
 // #include "soundfile.h"
 
@@ -180,6 +187,7 @@ void render(void* params) {
             render_clear_buffer();
             render_set_row(0, row1);
             render_set_row(1, row2);
+            render_set_row(2, std::to_string(encoderPos));
 
             vTaskDelay(1000);
         } else if (CURRENT_MODE == MODE_SELECT){
@@ -456,6 +464,30 @@ void gpio_callback(uint gpio, uint32_t events) {
 
     last_interrupt_time = current_time;  // Update last valid interrupt time
 
+    if (gpio == ROTARY_A_PIN || gpio == ROTARY_B_PIN) {
+        uint8_t a = gpio_get(ROTARY_A_PIN);
+        uint8_t b = gpio_get(ROTARY_B_PIN);
+        uint8_t state = (a << 1) | b;
+
+        // Decode quadrature state transition
+        switch ((lastState << 2) | state) {
+            case 0b0001:
+            case 0b0111:
+            case 0b1110:
+            case 0b1000:
+                encoderPos++;  // Clockwise
+                break;
+            case 0b0010:
+            case 0b1011:
+            case 0b1101:
+            case 0b0100:
+                encoderPos--;  // Counterclockwise
+                break;
+        }
+
+        lastState = state;
+    }
+
     if (gpio == BTN_UP) {
         if (Menu::get_current() != nullptr && CURRENT_MODE == MODE_SELECT) Menu::get_current()->move_selection(-1);
     }
@@ -482,24 +514,6 @@ void gpio_callback(uint gpio, uint32_t events) {
         }
         playing = false;
         paused = false;
-    }
-    else if (gpio == ROTARY_A_PIN) {
-        int a_state = gpio_get(ROTARY_A_PIN);
-        int b_state = gpio_get(ROTARY_B_PIN);
-
-        if (a_state == 0) {  // Only trigger when A falls
-            if (b_state == 1) {
-                // Clockwise movement (scroll down)
-                if (Menu::get_current() != nullptr) {
-                    Menu::get_current()->move_selection(-1);
-                }
-            } else {
-                // Counterclockwise movement (scroll up)
-                if (Menu::get_current() != nullptr) {
-                    Menu::get_current()->move_selection(1);
-                }
-            }
-        }
     } else if (gpio == DISPLAY_RESET_PIN) {
         TaskHandle_t xHandle;
         xTaskCreate(reset_display_task, "reset_display", 512, NULL, tskIDLE_PRIORITY, &xHandle);
@@ -540,6 +554,7 @@ void button_task(void *pvParameters) {
     gpio_set_dir(ROTARY_B_PIN, GPIO_IN);
     gpio_pull_up(ROTARY_A_PIN);
     gpio_pull_up(ROTARY_B_PIN);
+    lastState = (gpio_get(ROTARY_A_PIN) << 1) | gpio_get(ROTARY_B_PIN);
 
     gpio_set_irq_enabled_with_callback(BTN_UP, GPIO_IRQ_EDGE_FALL, true, &gpio_callback);
     gpio_set_irq_enabled(BTN_DOWN, GPIO_IRQ_EDGE_FALL, true);
@@ -548,7 +563,8 @@ void button_task(void *pvParameters) {
     gpio_set_irq_enabled(BTN_MODE, GPIO_IRQ_EDGE_FALL, true);
     gpio_set_irq_enabled(DISPLAY_RESET_PIN, GPIO_IRQ_EDGE_FALL, true);
 
-    gpio_set_irq_enabled(ROTARY_A_PIN, GPIO_IRQ_EDGE_RISE, true);
+    gpio_set_irq_enabled(ROTARY_A_PIN, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
+    gpio_set_irq_enabled(ROTARY_B_PIN, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
 
     while (true) vTaskDelay(pdMS_TO_TICKS(500));
 }
@@ -950,7 +966,7 @@ int main() {
     xTaskCreate(button_task, "button_input", 1024, nullptr, tskIDLE_PRIORITY, &xHandle);
     vTaskCoreAffinitySet(xHandle, CORE_AFFINITY_0);
 
-    xTaskCreate(render, "render", 1024, nullptr, tskIDLE_PRIORITY, &xHandle);
+    xTaskCreate(render, "render", 4096, nullptr, tskIDLE_PRIORITY, &xHandle);
     vTaskCoreAffinitySet(xHandle, CORE_AFFINITY_0);
 
     xTaskCreate(repl_task, "repl", 1024, nullptr, tskIDLE_PRIORITY, &xHandle);
