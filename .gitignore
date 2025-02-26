@@ -4,3 +4,6 @@ build
 include/wifi_data.h
 .vscode
 .cache
+.clang-tidy
+.clang-format
+.clangd
