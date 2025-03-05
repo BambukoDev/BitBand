@@ -10,9 +10,9 @@ if(WIN32)
 else()
     set(USERHOME $ENV{HOME})
 endif()
-set(sdkVersion 2.1.0)
-set(toolchainVersion 13_3_Rel1)
-set(picotoolVersion 2.1.0)
+set(sdkVersion 2.1.1)
+set(toolchainVersion 14_2_Rel1)
+set(picotoolVersion 2.1.1)
 set(picoVscode ${USERHOME}/.pico-sdk/cmake/pico-vscode.cmake)
 if (EXISTS ${picoVscode})
     include(${picoVscode})
@@ -103,10 +103,16 @@ pico_set_program_description(HandWatch "Copyright (c) 2025 Adam Jamrozowicz")
 pico_enable_stdio_uart(HandWatch 0)
 pico_enable_stdio_usb(HandWatch 1)
 
+target_compile_definitions(HandWatch
+  PUBLIC PICO_MAX_SHARED_IRQ_HANDLERS=20
+)
+
 # Add any user requested libraries
 target_link_libraries(HandWatch 
         pico_stdlib
         pico_multicore
+        pico_btstack_ble
+        pico_btstack_cyw43
         pico_cyw43_arch_none
 
         hardware_exception
@@ -125,5 +131,7 @@ target_link_libraries(HandWatch
         wave
         ds1302pico
 )
+
+pico_btstack_make_gatt_header(HandWatch PRIVATE "${CMAKE_CURRENT_LIST_DIR}/ble.gatt")
 
 pico_add_extra_outputs(HandWatch)

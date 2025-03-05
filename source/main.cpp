@@ -45,6 +45,7 @@ extern "C" {
 
 // Wireless stuff
 #include <pico/cyw43_arch.h>
+// #include "BluetoothFunc.hpp"
 
 #include "LCD_I2C.hpp"
 #include "DisplayPrint.hpp"
@@ -93,7 +94,8 @@ uint8_t readEncoderState() {
 }
 
 volatile uint32_t last_interrupt_time = 0;  // Debounce timing
-const uint32_t debounce_delay = 300;
+const uint32_t button_debounce_delay = 300;
+const uint32_t rotary_debounce_delay = 120;
 
 // #include "soundfile.h"
 
@@ -176,8 +178,9 @@ void render(void* params) {
         // if (Menu::get_current() != nullptr) Menu::get_current()->render();
         if (CURRENT_MODE == MODE_TIME) {
             ds1302getDateTime(&now);
-            adc_select_input(4);
-            float temperature = 27.0 - ((float)adc_read() * (3.3f / (1 << 12)) - 0.706) / 0.001721;
+            // adc_select_input(4);
+            // float temperature = 27.0 - ((float)adc_read() * (3.3f / (1 << 12)) - 0.706) / 0.001721;
+            float temperature = 0.0f;
             adc_select_input(3);
             float voltage = (float)adc_read() / 10.0f;
             char row1[21];
@@ -458,35 +461,29 @@ void lcd_health_monitor_task(void* param) {
 void gpio_callback(uint gpio, uint32_t events) {
     uint32_t current_time = to_ms_since_boot(get_absolute_time());
 
-    if (current_time - last_interrupt_time < debounce_delay) {
+    if (current_time - last_interrupt_time < rotary_debounce_delay) {
         return;  // Ignore bouncing
     }
-
-    last_interrupt_time = current_time;  // Update last valid interrupt time
 
     if (gpio == ROTARY_A_PIN || gpio == ROTARY_B_PIN) {
         uint8_t a = gpio_get(ROTARY_A_PIN);
         uint8_t b = gpio_get(ROTARY_B_PIN);
-        uint8_t state = (a << 1) | b;
+        if (a) encoderPos++;
+        if (b) encoderPos--;
 
-        // Decode quadrature state transition
-        switch ((lastState << 2) | state) {
-            case 0b0001:
-            case 0b0111:
-            case 0b1110:
-            case 0b1000:
-                encoderPos++;  // Clockwise
-                break;
-            case 0b0010:
-            case 0b1011:
-            case 0b1101:
-            case 0b0100:
-                encoderPos--;  // Counterclockwise
-                break;
-        }
+        if (encoderPos > 0 && Menu::get_current()) Menu::get_current()->move_selection(1);
+        if (encoderPos < 0 && Menu::get_current()) Menu::get_current()->move_selection(-1); 
 
-        lastState = state;
+        encoderPos = 0;
+
+        // printf("a: %i b: %i", a, b);
     }
+
+    if (current_time - last_interrupt_time < button_debounce_delay) {
+        return;  // Ignore bouncing
+    }
+
+    last_interrupt_time = current_time;  // Update last valid interrupt time
 
     if (gpio == BTN_UP) {
         if (Menu::get_current() != nullptr && CURRENT_MODE == MODE_SELECT) Menu::get_current()->move_selection(-1);
@@ -707,6 +704,15 @@ void repl_task(void* pvParameters) {
     }
 }
 
+void blink_task(void *params) {
+    while (true) {
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, true);
+        vTaskDelay(1000);
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, false);
+        vTaskDelay(1000);
+    }
+}
+
 int main() {
     lcd.BacklightOn();
 
@@ -732,11 +738,14 @@ int main() {
     // // gpio_set_pulls(BRIGHTNESS_PIN, true, false);
     // gpio_put(BRIGHTNESS_PIN, true);
 
+    lcd.CursorOn();
+
     olist.push("Starting...");
     olist.render();
 
     {
-        bool clock_set = set_sys_clock_khz(180000, true);
+        // bool clock_set = set_sys_clock_khz(180000, true);
+        bool clock_set = set_sys_clock_khz(240000, true);
         setup_default_uart();
         if (!clock_set) {
             olist.push("Overclock failed");
@@ -783,9 +792,20 @@ int main() {
     olist.push("RTC success");
     olist.render();
 
+    // sleep_ms(4000);
+
+    // if (cyw43_arch_init()) {
+    //     olist.push("Wireless failed");
+    //     olist.render();
+    // } else {
+    //     olist.push("Wireless success");
+    //     olist.render();
+    // }
+
     adc_init();
-    adc_set_temp_sensor_enabled(true);
     // cyw43_arch_init();
+    adc_set_temp_sensor_enabled(true);
+
     // gpio_init(CYW43_WL_GPIO_LED_PIN);
 
     if (!sd_init_driver()) {
@@ -942,6 +962,8 @@ int main() {
         mainmenu.set_as_current();
     }, nullptr);
 
+    lcd.CursorOff();
+
     // sleep_ms(2000);
     lcd.Clear();
     lcd.Home();
@@ -954,7 +976,7 @@ int main() {
     TaskHandle_t xHandle;
 
     // xTaskCreate(main_thread, "main", 1024, &lcd, tskIDLE_PRIORITY + 4UL, nullptr);
-    // xTaskCreate(blink_led, "blink", 128, NULL, tskIDLE_PRIORITY, &xHandle);
+    // xTaskCreate(blink_task, "blink", 128, NULL, tskIDLE_PRIORITY, &xHandle);
     // vTaskCoreAffinitySet(xHandle, CORE_AFFINITY_0);
 
     // xTaskCreate(log_time, "log_time", 256, NULL, tskIDLE_PRIORITY, &xHandle);
@@ -971,6 +993,9 @@ int main() {
 
     xTaskCreate(repl_task, "repl", 1024, nullptr, tskIDLE_PRIORITY, &xHandle);
     vTaskCoreAffinitySet(xHandle, CORE_AFFINITY_0);
+
+    // xTaskCreate(bluetooth_task, "bluetooth", 4096, nullptr, tskIDLE_PRIORITY, &xHandle);
+    // vTaskCoreAffinitySet(xHandPle, CORE_AFFINITY_0);
 
     // xTaskCreate(lcd_health_monitor_task, "health_monitor", 1024, nullptr, tskIDLE_PRIORITY, &xHandle);
     // vTaskCoreAffinitySet(xHandle, CORE_AFFINITY_0);
